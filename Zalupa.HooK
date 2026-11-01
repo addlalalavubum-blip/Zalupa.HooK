@@ -63,7 +63,7 @@ end
 
 local i18n = {
     EN = {
-        tab_main = "Main", tab_combat = "Combat", tab_visuals = "Visuals", tab_player = "Player", tab_world = "World", tab_settings = "Settings",
+        tab_main = "Main", tab_combat = "Combat", tab_visuals = "Visuals", tab_player = "Player", tab_world = "World", tab_misc = "Misc", tab_settings = "Settings",
         grp_silent_aim = "Silent Aim", grp_triggerbot = "Triggerbot", grp_gun_mods = "Gun Mods",
         grp_projectile = "Projectile Options", grp_inventory = "Inventory Checker",
         grp_sounds = "Custom Sounds", grp_player_esp = "Player ESP", grp_esp_options = "ESP Options",
@@ -82,7 +82,7 @@ local i18n = {
         grp_lighting_extras = "Lighting Extras",
     },
     RU = {
-        tab_main = "Главная", tab_combat = "Бой", tab_visuals = "Визуал", tab_player = "Игрок", tab_world = "Мир", tab_settings = "Настройки",
+        tab_main = "Главная", tab_combat = "Бой", tab_visuals = "Визуал", tab_player = "Игрок", tab_world = "Мир", tab_misc = "Разное", tab_settings = "Настройки",
         grp_silent_aim = "Сайлент Эйм", grp_triggerbot = "Триггербот", grp_gun_mods = "Моды Оружия",
         grp_projectile = "Параметры Снарядов", grp_inventory = "Проверка Инвентаря",
         grp_sounds = "Свои Звуки", grp_player_esp = "ESP Игроков", grp_esp_options = "Настройки ESP",
@@ -101,7 +101,7 @@ local i18n = {
         grp_lighting_extras = "Доп. Освещение",
     },
     ES = {
-        tab_main = "Principal", tab_combat = "Combate", tab_visuals = "Visuales", tab_player = "Jugador", tab_world = "Mundo", tab_settings = "Ajustes",
+        tab_main = "Principal", tab_combat = "Combate", tab_visuals = "Visuales", tab_player = "Jugador", tab_world = "Mundo", tab_misc = "Varios", tab_settings = "Ajustes",
         grp_silent_aim = "Apuntado Silencioso", grp_triggerbot = "Triggerbot", grp_gun_mods = "Mods de Armas",
         grp_projectile = "Opciones de Proyectil", grp_inventory = "Revisar Inventario",
         grp_sounds = "Sonidos Personalizados", grp_player_esp = "ESP Jugadores", grp_esp_options = "Opciones ESP",
@@ -147,6 +147,7 @@ local Tabs = {
     Player   = Window:AddTab(L("tab_player")),
     World    = Window:AddTab(L("tab_world")),
     Skins    = Window:AddTab(L("tab_skins")),
+    Misc     = Window:AddTab(L("tab_misc")),
     Settings = Window:AddTab(L("tab_settings")),
 }
 
@@ -160,6 +161,7 @@ local silent_aim = {
     target_part = nil, isvisible = false,
     nospread = false, target_npc = false, target_heli = false,
     testwallbang = false,
+    wallcheck = false,
     triggerbot = false, triggerbot_manipulation = false,
     corner_shoot = false, corner_shoot_dist = 5,
     manipulated = false, manipulated_origin = nil,
@@ -330,6 +332,8 @@ end))
 -- [BLOCK 04a] MAIN TAB — Local Player Info + Report notifications
 -- ═══════════════════════════════════════════════════════════════════════════
 cheat.report_notifications = false
+cheat.friends = {}
+cheat.friend_color = Color3.fromRGB(0, 150, 255)
 local MainInfoGroup = Tabs.Main:AddLeftGroupbox("Local Player Info")
 local MainNotifyGroup = Tabs.Main:AddRightGroupbox("Notifications")
 
@@ -347,6 +351,7 @@ _lpi_add("time", "Play time: 0h")
 
 local _lpi_price_cache = {}
 local function _lpi_item_price(name)
+    if not name or name == "" then return 0 end
     if _lpi_price_cache[name] ~= nil then return _lpi_price_cache[name] end
     local list = ReplicatedStorage:FindFirstChild("ItemsList")
     local base = tostring(name):gsub("_unlocked$", ""):gsub("_T%d+$", "")
@@ -356,18 +361,25 @@ local function _lpi_item_price(name)
     if #_lpi_price_cache < 2000 then _lpi_price_cache[name] = price end
     return price
 end
-local function _lpi_inventory_value(folder, depth)
-    if not folder or depth > 6 then return 0, nil end
+
+-- Recursive inventory value calculator
+-- Handles game structure: Inventory → containers → each may have "Inventory" subfolder → items
+local function _lpi_inv_value(folder, depth)
+    if not folder or depth > 6 then return 0, nil, 0 end
     local total, best_name, best_val = 0, nil, 0
-    for _, obj in ipairs(folder:GetChildren()) do
-        local amount = tonumber(obj:GetAttribute("Amount")) or 1
-        local val = _lpi_item_price(obj.Name) * math.max(1, math.floor(amount))
+    for _, child in ipairs(folder:GetChildren()) do
+        -- Check if this child is an item (has Amount attribute)
+        local amount = tonumber(child:GetAttribute("Amount")) or 1
+        local val = _lpi_item_price(child.Name) * math.max(1, math.floor(amount))
         total = total + val
-        if val > best_val then best_val, best_name = val, obj.Name end
-        local nested = obj:FindFirstChild("Inventory")
-        local cv, cn, cb = _lpi_inventory_value(nested, depth + 1)
-        total = total + cv
-        if cb > best_val then best_val, best_name = cb, cn end
+        if val > best_val then best_val, best_name = val, child.Name end
+        -- Recurse into "Inventory" subfolder (containers have nested inventory)
+        local nested = child:FindFirstChild("Inventory")
+        if nested then
+            local cv, cn, cb = _lpi_inv_value(nested, depth + 1)
+            total = total + cv
+            if cb > best_val then best_val, best_name = cb, cn end
+        end
     end
     return total, best_name, best_val
 end
@@ -380,15 +392,15 @@ cheat.utility.new_heartbeat(function()
     local folder = ReplicatedStorage:FindFirstChild("Players")
     local data = folder and folder:FindFirstChild(LocalPlayer.Name)
     if not data then return end
+    -- EXACT paths from swim.lua:
     local status = data:FindFirstChild("Status")
-    -- Recursive search for stats (like existing ESP high_kd code does)
-    local stats_obj = data:FindFirstChild("WipeStatistics", true) or data:FindFirstChild("Statistics", true)
-    -- Reports from UAC
-    local uac = data:FindFirstChild("UAC", true)
+    local journey = status and status:FindFirstChild("Journey")
+    local stats = journey and journey:FindFirstChild("Statistics")
+    local uac = status and status:FindFirstChild("UAC")
+    -- Reports
     local rep_folder = uac and uac:FindFirstChild("Reports")
     local total_reps = 0
     if rep_folder then
-        -- Try attribute "1" first (swim pattern), then sum all numeric attributes
         local attr1 = rep_folder:GetAttribute("1")
         if typeof(attr1) == "number" then
             total_reps = attr1
@@ -398,29 +410,33 @@ cheat.utility.new_heartbeat(function()
             end
         end
     end
-    -- K/D from stats (try multiple attribute names)
-    local kills = 0
-    local deaths = 0
-    if stats_obj then
-        kills = stats_obj:GetAttribute("K_PVP") or stats_obj:GetAttribute("Kills") or 0
-        deaths = stats_obj:GetAttribute("D_PVP") or stats_obj:GetAttribute("Deaths") or 0
-    end
+    -- K/D
+    local kills = stats and (stats:GetAttribute("K_PVP") or stats:GetAttribute("Kills")) or 0
+    local deaths = stats and (stats:GetAttribute("D_PVP") or stats:GetAttribute("Deaths")) or 0
     -- Play time
-    local hours = stats_obj and stats_obj:GetAttribute("TimePlayed") or 0
-    -- Loot value
+    local hours = stats and stats:GetAttribute("TimePlayed") or 0
+    -- Loot value — scan inventory + hotbar recursively
     local inv = data:FindFirstChild("Inventory")
     local hotbar = data:FindFirstChild("Hotbar")
-    local loot_val, top_name = _lpi_inventory_value(inv, 0)
-    local hb_val, hb_name = _lpi_inventory_value(hotbar, 0)
-    loot_val = loot_val + hb_val
-    if (not top_name or top_name == "") and hb_name then top_name = hb_name end
+    local loot_val, top_name = 0, nil
+    if inv then
+        local v, n, _ = _lpi_inv_value(inv, 0)
+        loot_val = loot_val + v
+        if n then top_name = n end
+    end
+    if hotbar then
+        local v, n, _ = _lpi_inv_value(hotbar, 0)
+        loot_val = loot_val + v
+        if n and (not top_name or v > (_lpi_item_price(top_name) or 0)) then top_name = n end
+    end
     local player_count = #Players:GetPlayers()
-    if _lpi_labels.reports then _lpi_labels.reports:SetText("Reports: " .. tostring(total_reps)) end
-    if _lpi_labels.kd then _lpi_labels.kd:SetText("K/D: " .. tostring(kills) .. "/" .. tostring(deaths)) end
-    if _lpi_labels.loot then _lpi_labels.loot:SetText("Loot value: $" .. tostring(loot_val)) end
-    if _lpi_labels.topitem then _lpi_labels.topitem:SetText("Top item: " .. (top_name or "-") .. " ($" .. tostring(_lpi_item_price(top_name or "")) .. ")") end
-    if _lpi_labels.players then _lpi_labels.players:SetText("Players in raid: " .. tostring(player_count)) end
-    if _lpi_labels.time then _lpi_labels.time:SetText("Play time: " .. math.floor((hours or 0) / 3600) .. "h") end
+    -- Obsidian AddLabel returns object with .Text property (not :SetText)
+    if _lpi_labels.reports then _lpi_labels.reports.Text = "Reports: " .. tostring(total_reps) end
+    if _lpi_labels.kd then _lpi_labels.kd.Text = "K/D: " .. tostring(kills) .. "/" .. tostring(deaths) end
+    if _lpi_labels.loot then _lpi_labels.loot.Text = "Loot value: $" .. tostring(loot_val) end
+    if _lpi_labels.topitem then _lpi_labels.topitem.Text = "Top item: " .. (top_name or "-") .. " ($" .. tostring(_lpi_item_price(top_name or "")) .. ")" end
+    if _lpi_labels.players then _lpi_labels.players.Text = "Players in raid: " .. tostring(player_count) end
+    if _lpi_labels.time then _lpi_labels.time.Text = "Play time: " .. math.floor((hours or 0) / 3600) .. "h" end
 end)
 
 MainNotifyGroup:AddToggle("rep_notif", { Text = "Report Notifications", Default = false, Tooltip = "Notify when you receive a new report",
@@ -428,17 +444,13 @@ MainNotifyGroup:AddToggle("rep_notif", { Text = "Report Notifications", Default 
 MainNotifyGroup:AddButton("rep_show", { Text = "Show Current Reports", Callback = function()
     local folder = ReplicatedStorage:FindFirstChild("Players")
     local data = folder and folder:FindFirstChild(LocalPlayer.Name)
-    local uac = data and data:FindFirstChild("UAC", true)
+    local status = data and data:FindFirstChild("Status")
+    local uac = status and status:FindFirstChild("UAC")
     local rep_folder = uac and uac:FindFirstChild("Reports")
     local total = 0
     if rep_folder then
-        local attr1 = rep_folder:GetAttribute("1")
-        if typeof(attr1) == "number" then
-            total = attr1
-        else
-            for _, count in pairs(rep_folder:GetAttributes()) do
-                if typeof(count) == "number" then total = total + count end
-            end
+        for _, count in pairs(rep_folder:GetAttributes()) do
+            if typeof(count) == "number" then total = total + count end
         end
     end
     Library:Notify({ Title = "Reports", Description = "You currently have " .. tostring(total) .. " report(s)", Time = 5 })
@@ -449,17 +461,13 @@ cheat.utility.new_heartbeat(function()
     if not cheat.report_notifications then _rep_last_total = nil; return end
     local folder = ReplicatedStorage:FindFirstChild("Players")
     local data = folder and folder:FindFirstChild(LocalPlayer.Name)
-    local uac = data and data:FindFirstChild("UAC", true)
+    local status = data and data:FindFirstChild("Status")
+    local uac = status and status:FindFirstChild("UAC")
     local rep_folder = uac and uac:FindFirstChild("Reports")
     local total = 0
     if rep_folder then
-        local attr1 = rep_folder:GetAttribute("1")
-        if typeof(attr1) == "number" then
-            total = attr1
-        else
-            for _, count in pairs(rep_folder:GetAttributes()) do
-                if typeof(count) == "number" then total = total + count end
-            end
+        for _, count in pairs(rep_folder:GetAttributes()) do
+            if typeof(count) == "number" then total = total + count end
         end
     end
     if _rep_last_total == nil then
@@ -582,6 +590,7 @@ AimGroup:AddToggle("AimEnabled", { Text = "Enable Silent Aim", Default = false, 
 AimGroup:AddDropdown("AimPart", { Text = "Target Part", Values = {"Head","FaceHitBox","HeadTopHitbox","UpperTorso","LowerTorso","HumanoidRootPart","LeftFoot","LeftLowerLeg","LeftUpperLeg","LeftHand","LeftLowerArm","LeftUpperArm","RightFoot","RightLowerLeg","RightUpperLeg","RightHand","RightLowerArm","RightUpperArm"}, Default = "Head", Multi = false, Callback = function(v) silent_aim.part = v end })
 AimGroup:AddToggle("InstantHit", { Text = "Instant Hit", Default = true, Callback = function(v) silent_aim.instant = v end })
 AimGroup:AddToggle("Wallbang", { Text = "Wallbang", Default = false, Callback = function(v) silent_aim.testwallbang = v end })
+AimGroup:AddToggle("WallCheck", { Text = "Wall Check", Default = false, Tooltip = "Only target visible players (ignore targets behind walls)", Callback = function(v) silent_aim.wallcheck = v end })
 AimGroup:AddToggle("Manipulation", { Text = "Manipulation (Corner)", Default = false, Callback = function(v) silent_aim.corner_shoot = v end })
 AimGroup:AddSlider("ManipDist", { Text = "Manipulation Distance", Min = 5, Max = 50, Rounding = 1, Default = 5, Callback = function(v) silent_aim.corner_shoot_dist = v end })
 AimGroup:AddToggle("TargetAI", { Text = "Target AI", Default = false, Callback = function(v) silent_aim.target_npc = v end })
@@ -1921,6 +1930,11 @@ cheat.EspLibrary = {} do
             end
             realname.Text = name_str
 
+            -- Friend ESP coloring — override realname color for friends
+            if not isnpc and cheat.is_friend(player) then
+                realname.Color = cheat.friend_color
+            end
+
             dist.Text     = math.round(dist3d/3).." meters"
             dist.Position = (corners.bottomLeft + corners.bottomRight) * 0.5
             local _cl = os.clock()
@@ -2619,18 +2633,21 @@ CameraGroup:AddToggle("cam_fov", { Text = "FOV Override", Default = false, Callb
 CameraGroup:AddSlider("cam_fov_size", { Text = "FOV Size", Min = 10, Max = 120, Rounding = 0, Default = 70, Callback = function(v) cam_fov_size = v end })
 
 local zoomToggle = CameraGroup:AddToggle("cam_zoom", { Text = "Zoom", Default = false, Callback = function(v) cam_zoom_enabled = v end })
-zoomToggle:AddKeyPicker("zoom_key", { Default = "None", Text = "Zoom Keybind", Mode = "Toggle", SyncToggleState = true })
+zoomToggle:AddKeyPicker("zoom_key", { Default = "None", Text = "Zoom Keybind", Mode = "Hold", SyncToggleState = true })
 
 CameraGroup:AddSlider("cam_zoom_size", { Text = "Zoom Size", Min = 1, Max = 90, Rounding = 0, Default = 10, Callback = function(v) cam_zoom_size = v end })
 CameraGroup:AddToggle("cam_noscreen", { Text = "No Screen Effects", Default = false, Callback = function(v) no_screen_fx = v end })
 
 -- FIX: zoom читает zoomToggle.Value напрямую — без зависимости от callback'ов keypicker'а
+local _zoom_default_fov = Camera.FieldOfView
 cheat.utility.new_renderstepped(function()
     local target_fov = nil
     if zoomToggle.Value then
         target_fov = cam_zoom_size
     elseif cam_fov_enabled then
         target_fov = cam_fov_size
+    else
+        target_fov = _zoom_default_fov
     end
     if target_fov and Camera.FieldOfView ~= target_fov then
         Camera.FieldOfView = target_fov
@@ -5228,7 +5245,7 @@ local function get_closest_target(usefov, fov_size, aimpart, npc, target_heli, r
     end
     for _, plr in Players:GetPlayers() do
         local character = plr.Character
-        if plr ~= LocalPlayer and character then
+        if plr ~= LocalPlayer and character and not cheat.is_friend(plr) then
             local part = character:FindFirstChild(aimpart)
             local humanoid = character:FindFirstChildOfClass("Humanoid")
             if part and humanoid and humanoid.Health > 0 then
@@ -5335,6 +5352,18 @@ cheat.utility.new_heartbeat(function(delta)
     end
 
     silent_aim.target_part, silent_aim.is_npc = get_closest_target(silent_aim.fov, silent_aim.fov_size, silent_aim.part, silent_aim.target_npc, silent_aim.target_heli)
+
+    -- Wall check: if enabled, skip targets behind walls
+    if silent_aim.wallcheck and silent_aim.target_part then
+        local vp = RaycastParams.new()
+        vp.FilterType = Enum.RaycastFilterType.Exclude
+        vp.FilterDescendantsInstances = { get_nocollision(), Camera, LocalPlayer.Character }
+        local cast = Workspace:Raycast(Camera.CFrame.p, silent_aim.target_part.Position - Camera.CFrame.p, vp)
+        if cast and cast.Instance and not cast.Instance:IsDescendantOf(silent_aim.target_part.Parent) then
+            silent_aim.target_part = nil
+            silent_aim.isvisible = false
+        end
+    end
 
     silent_aim.manipulated = false
     local old_origin = silent_aim.manipulated_origin
@@ -6786,6 +6815,89 @@ end)()
             Lighting.OutdoorAmbient = lighting_snapshot.outdoor
         end
     end })
+end)()
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- [BLOCK 15b] MISC TAB — Friend System
+-- ═══════════════════════════════════════════════════════════════════════════
+;(function()
+    local FriendGroup = Tabs.Misc:AddLeftGroupbox("Friend System")
+    local FriendListGroup = Tabs.Misc:AddLeftGroupbox("Friend List")
+    local _friend_labels = {}
+    local _update_friend_list
+
+    FriendGroup:AddToggle("friend_add_mode", { Text = "Add Friend Mode", Default = false, Tooltip = "Enable, then look at a player and press the keybind to add them as friend",
+        Callback = function(v) cheat.friend_add_mode = v end })
+    :AddKeyPicker("friend_add_key", { Default = "None", Text = "Add Friend Key", Mode = "Hold", SyncToggleState = true })
+    FriendGroup:AddColorPicker("friend_color", { Title = "Friend Color", Default = Color3.fromRGB(0, 150, 255), Callback = function(v) cheat.friend_color = v end })
+    FriendGroup:AddButton("friend_clear", { Text = "Clear All Friends", Callback = function()
+        cheat.friends = {}
+        _update_friend_list()
+        Library:Notify({ Title = "Friends", Description = "All friends cleared", Time = 3 })
+    end })
+
+    function _update_friend_list()
+        -- Clear old labels
+        for _, l in pairs(_friend_labels) do pcall(function() l:Destroy() end) end
+        _friend_labels = {}
+        -- Add current friends
+        local count = 0
+        for name, _ in pairs(cheat.friends) do
+            count = count + 1
+            _friend_labels[name] = FriendListGroup:AddLabel(count .. ". " .. name)
+        end
+        if count == 0 then
+            _friend_labels["_empty"] = FriendListGroup:AddLabel("No friends added")
+        end
+    end
+    _update_friend_list()
+
+    -- Friend add logic: when keybind is held and friend_add_mode is on, raycast from mouse to find player
+    local _friend_add_key_name = nil
+    cheat.utility.new_heartbeat(function()
+        -- Get the keybind state
+        local key = cheat.Options and cheat.Options.friend_add_key
+        if not key then return end
+        local key_val = key.Value
+        if key_val and key_val ~= "None" and key_val ~= "" then
+            _friend_add_key_name = key_val
+        end
+    end)
+
+    cheat.utility.new_heartbeat(function()
+        if not cheat.friend_add_mode then return end
+        if not _friend_add_key_name or _friend_add_key_name == "None" then return end
+        -- Check if the key is held
+        local kc = Enum.KeyCode[_friend_add_key_name]
+        if not kc then return end
+        if not UserInputService:IsKeyDown(kc) then return end
+        -- Raycast from mouse to find player
+        local mousepos = UserInputService:GetMouseLocation()
+        local ray = Camera:ViewportPointToRay(mousepos.X, mousepos.Y)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { LocalPlayer.Character }
+        local hit = Workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
+        if hit and hit.Instance then
+            local model = hit.Instance:FindFirstAncestorOfClass("Model")
+            if model then
+                local player = Players:GetPlayerFromCharacter(model)
+                if player and player ~= LocalPlayer then
+                    if not cheat.friends[player.Name] then
+                        cheat.friends[player.Name] = true
+                        _update_friend_list()
+                        Library:Notify({ Title = "Friends", Description = "Added " .. player.Name .. " as friend", Time = 3 })
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Helper: check if a player is a friend
+    cheat.is_friend = function(player)
+        if not player then return false end
+        return cheat.friends[player.Name] == true
+    end
 end)()
 
 -- ═══════════════════════════════════════════════════════════════════════════
