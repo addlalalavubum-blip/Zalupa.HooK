@@ -7134,6 +7134,80 @@ end)()
 end)()
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- [BLOCK 15c] MISC TAB — Fake Map (ported from swimhub)
+-- Добавляет фейковые DAGR/GPS, EstonianBorderMap, Pathfinder/Compass в инвентарь,
+-- чтобы ты всегда видел свою позицию/карту/компас в игре.
+-- ═══════════════════════════════════════════════════════════════════════════
+do
+    local FakeMapGroup = Tabs.Misc:AddLeftGroupbox("Fake Map")
+    local fake_map_owned = {}
+
+    local function fake_map_inventory()
+        local folder = ReplicatedStorage:FindFirstChild("Players")
+        local data = folder and folder:FindFirstChild(LocalPlayer.Name)
+        return data and data:FindFirstChild("Inventory")
+    end
+
+    local function fake_map_apply()
+        local inv = fake_map_inventory()
+        if not inv then return end
+        local list = ReplicatedStorage:FindFirstChild("ItemsList")
+        -- Список предметов которые добавляем: GPS, Map, Compass
+        for _, entry in ipairs({
+            {name = "DAGR", slot = "EquipmentGPS"},
+            {name = "EstonianBorderMap", slot = "EquipmentMap"},
+            {name = "Pathfinder", slot = "EquipmentCompass"},
+        }) do
+            local has = inv:FindFirstChild(entry.name)
+            if not has then
+                local obj = Instance.new("ObjectValue")
+                obj.Name = entry.name
+                if list then
+                    local ref = list:FindFirstChild(entry.name)
+                    if ref then obj.Value = ref end
+                end
+                obj:SetAttribute("Slot", entry.slot)
+                obj.Parent = inv
+                fake_map_owned[entry.name] = obj
+            end
+        end
+    end
+
+    local function fake_map_remove()
+        for name, obj in pairs(fake_map_owned) do
+            if obj and obj.Parent then
+                pcall(function() obj:Destroy() end)
+            end
+            fake_map_owned[name] = nil
+        end
+    end
+
+    FakeMapGroup:AddToggle("fake_map_toggle", {
+        Text = "Fake Map (GPS + Map + Compass)",
+        Default = false,
+        Tooltip = "Adds fake DAGR (GPS), EstonianBorderMap (Map) and Pathfinder (Compass) to your inventory so you can always see your position",
+        Callback = function(bool)
+            if bool then
+                pcall(fake_map_apply)
+                Library:Notify({ Title = "Fake Map", Description = "Map/GPS/Compass added", Time = 3 })
+            else
+                pcall(fake_map_remove)
+                Library:Notify({ Title = "Fake Map", Description = "Map/GPS/Compass removed", Time = 3 })
+            end
+        end
+    })
+
+    -- Cleanup on unload
+    if cheat.raw_conns then
+        table.insert(cheat.raw_conns, {
+            Disconnect = function()
+                pcall(fake_map_remove)
+            end
+        })
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- [BLOCK 16] FINAL INIT
 -- ═══════════════════════════════════════════════════════════════════════════
 -- FIX #3: полный unload — чистит хуки, drawing'и, коннекты, GUI, parts, lighting,
