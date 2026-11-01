@@ -334,6 +334,14 @@ end))
 cheat.report_notifications = false
 cheat.friends = {}
 cheat.friend_color = Color3.fromRGB(0, 150, 255)
+-- FIX: is_friend must be defined BEFORE ESP uses it (line ~1934)
+cheat.is_friend = function(player)
+    if not player then return false end
+    return cheat.friends[player.Name] == true
+end
+-- FIX: initialize fog snapshot/listeners BEFORE NoFog toggle uses them
+cheat._fog_snapshot = nil
+cheat._fog_listeners = nil
 local MainInfoGroup = Tabs.Main:AddLeftGroupbox("Local Player Info")
 local MainNotifyGroup = Tabs.Main:AddRightGroupbox("Notifications")
 
@@ -430,13 +438,13 @@ cheat.utility.new_heartbeat(function()
         if n and (not top_name or v > (_lpi_item_price(top_name) or 0)) then top_name = n end
     end
     local player_count = #Players:GetPlayers()
-    -- Obsidian AddLabel returns object with .Text property (not :SetText)
-    if _lpi_labels.reports then _lpi_labels.reports.Text = "Reports: " .. tostring(total_reps) end
-    if _lpi_labels.kd then _lpi_labels.kd.Text = "K/D: " .. tostring(kills) .. "/" .. tostring(deaths) end
-    if _lpi_labels.loot then _lpi_labels.loot.Text = "Loot value: $" .. tostring(loot_val) end
-    if _lpi_labels.topitem then _lpi_labels.topitem.Text = "Top item: " .. (top_name or "-") .. " ($" .. tostring(_lpi_item_price(top_name or "")) .. ")" end
-    if _lpi_labels.players then _lpi_labels.players.Text = "Players in raid: " .. tostring(player_count) end
-    if _lpi_labels.time then _lpi_labels.time.Text = "Play time: " .. math.floor((hours or 0) / 3600) .. "h" end
+    -- FIX #1: Obsidian Label требует :SetText() — прямой .Text= не обновляет UI
+    pcall(function() if _lpi_labels.reports   then _lpi_labels.reports:SetText("Reports: " .. tostring(total_reps)) end end)
+    pcall(function() if _lpi_labels.kd         then _lpi_labels.kd:SetText("K/D: " .. tostring(kills) .. "/" .. tostring(deaths)) end end)
+    pcall(function() if _lpi_labels.loot       then _lpi_labels.loot:SetText("Loot value: $" .. tostring(loot_val)) end end)
+    pcall(function() if _lpi_labels.topitem     then _lpi_labels.topitem:SetText("Top item: " .. (top_name or "-") .. " ($" .. tostring(_lpi_item_price(top_name or "")) .. ")") end end)
+    pcall(function() if _lpi_labels.players     then _lpi_labels.players:SetText("Players in raid: " .. tostring(player_count)) end end)
+    pcall(function() if _lpi_labels.time        then _lpi_labels.time:SetText("Play time: " .. math.floor((hours or 0) / 3600) .. "h") end end)
 end)
 
 MainNotifyGroup:AddToggle("rep_notif", { Text = "Report Notifications", Default = false, Tooltip = "Notify when you receive a new report",
@@ -2778,9 +2786,11 @@ finder_toggle:AddColorPicker("find_col", { Title = "Color", Default = Color3.fro
 ItemFinderGroup:AddToggle("find_on_esp", { Text = "Show Selected Items on Player ESP", Default = false, Callback = function(v) item_finder_esp_enabled = v end })
 
 ItemFinderGroup:AddSlider("find_glow", { Text = "Glow Size", Min = 1, Max = 15, Rounding = 0, Default = 5, Callback = function(v) finder_glow_size = v end })
--- FIX: X/Y слайдеры теперь привязаны к finder_panel.pos
+-- FIX: move finder_panel declaration BEFORE slider callbacks that reference it
 local finder_pos_x = math.floor(Camera.ViewportSize.X-250)
 local finder_pos_y = 50
+local finder_panel = {}
+finder_panel.pos = Vector2.new(finder_pos_x, finder_pos_y)
 ItemFinderGroup:AddSlider("find_x", { Text = "Finder X Pos", Min = 0, Max = 3000, Rounding = 0, Default = finder_pos_x, Callback = function(v)
     finder_pos_x = v
     if finder_panel then finder_panel.pos = Vector2.new(finder_pos_x, finder_pos_y) end
@@ -2789,9 +2799,6 @@ ItemFinderGroup:AddSlider("find_y", { Text = "Finder Y Pos", Min = 0, Max = 3000
     finder_pos_y = v
     if finder_panel then finder_panel.pos = Vector2.new(finder_pos_x, finder_pos_y) end
 end })
-
-local finder_panel = {}
-finder_panel.pos = Vector2.new(finder_pos_x, finder_pos_y)
 finder_panel.width = 200
 finder_panel.dragging = false
 finder_panel.dragoffset = Vector2.new(0,0)
@@ -5756,12 +5763,18 @@ end)
     end
 
     -- Target Info Panel drawings
-    local tipanel = {}
-    tipanel.pos = Vector2.new(silent_aim.tipanel_x, silent_aim.tipanel_y)
-    tipanel.width = 280
-    tipanel.height = 168
-    tipanel.dragging = false
-    tipanel.dragoffset = Vector2.zero
+    -- FIX: pre-declare ALL fields so Luau strict type checker doesn't complain
+    local tipanel = {
+        pos = Vector2.new(silent_aim.tipanel_x, silent_aim.tipanel_y),
+        width = 280,
+        height = 168,
+        dragging = false,
+        dragoffset = Vector2.zero,
+        _visible_cache = false,
+        _data_target = nil,
+        _next_data_update = 0,
+        _avatar_userid = nil,
+    }
     local avatar_cache = {}
     tipanel.bg = cheat.utility.new_drawing("Square", { Visible=false, Filled=true, Color=tipanel_settings.bgcolor, Size=Vector2.new(tipanel.width, tipanel.height), Position=tipanel.pos, Transparency=tipanel_settings.bgtrans, ZIndex=10 })
     tipanel.border = cheat.utility.new_drawing("Square", { Visible=false, Filled=false, Color=tipanel_settings.bordercolor, Size=Vector2.new(tipanel.width, tipanel.height), Position=tipanel.pos, Thickness=1, Transparency=1, ZIndex=11 })
@@ -6818,31 +6831,37 @@ end)()
 end)()
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- [BLOCK 15b] MISC TAB — Friend System
+-- [BLOCK 15b] MISC TAB — Friend System (player list browser)
 -- ═══════════════════════════════════════════════════════════════════════════
 ;(function()
-    local FriendGroup = Tabs.Misc:AddLeftGroupbox("Friend System")
+    local FriendGroup     = Tabs.Misc:AddLeftGroupbox("Friend System")
     local FriendListGroup = Tabs.Misc:AddLeftGroupbox("Friend List")
     local _friend_labels = {}
-    local _update_friend_list
+    local _friend_browser_visible = false
+    local _rebuild_player_list = function() end  -- placeholder, reassigned below
 
-    FriendGroup:AddToggle("friend_add_mode", { Text = "Add Friend Mode", Default = false, Tooltip = "Enable, then look at a player and press the keybind to add them as friend",
-        Callback = function(v) cheat.friend_add_mode = v end })
-    :AddKeyPicker("friend_add_key", { Default = "None", Text = "Add Friend Key", Mode = "Hold", SyncToggleState = true })
-    FriendGroup:AddColorPicker("friend_color", { Title = "Friend Color", Default = Color3.fromRGB(0, 150, 255), Callback = function(v) cheat.friend_color = v end })
-    FriendGroup:AddButton("friend_clear", { Text = "Clear All Friends", Callback = function()
-        cheat.friends = {}
-        _update_friend_list()
-        Library:Notify({ Title = "Friends", Description = "All friends cleared", Time = 3 })
-    end })
+    FriendGroup:AddLabel("Friend Color"):AddColorPicker("friend_color", {
+        Default = Color3.fromRGB(0, 150, 255),
+        Callback = function(v) cheat.friend_color = v end
+    })
+    FriendGroup:AddButton("friend_clear", {
+        Text = "Clear All Friends",
+        Callback = function()
+            cheat.friends = {}
+            _update_friend_list()
+            if _friend_browser_visible then _rebuild_player_list() end
+            Library:Notify({ Title = "Friends", Description = "All friends cleared", Time = 3 })
+        end
+    })
 
     function _update_friend_list()
-        -- Clear old labels
         for _, l in pairs(_friend_labels) do pcall(function() l:Destroy() end) end
         _friend_labels = {}
-        -- Add current friends
+        local sorted = {}
+        for name, _ in pairs(cheat.friends) do table.insert(sorted, name) end
+        table.sort(sorted)
         local count = 0
-        for name, _ in pairs(cheat.friends) do
+        for _, name in ipairs(sorted) do
             count = count + 1
             _friend_labels[name] = FriendListGroup:AddLabel(count .. ". " .. name)
         end
@@ -6852,52 +6871,266 @@ end)()
     end
     _update_friend_list()
 
-    -- Friend add logic: when keybind is held and friend_add_mode is on, raycast from mouse to find player
-    local _friend_add_key_name = nil
-    cheat.utility.new_heartbeat(function()
-        -- Get the keybind state
-        local key = cheat.Options and cheat.Options.friend_add_key
-        if not key then return end
-        local key_val = key.Value
-        if key_val and key_val ~= "None" and key_val ~= "" then
-            _friend_add_key_name = key_val
+    -- Auto-refresh when player joins/leaves while browser is open
+    Players.PlayerRemoving:Connect(function(player)
+        if cheat.friends[player.Name] then
+            cheat.friends[player.Name] = nil
+            _update_friend_list()
+            if _friend_browser_visible then _rebuild_player_list() end
+        end
+    end)
+    Players.PlayerAdded:Connect(function()
+        if _friend_browser_visible then
+            task.wait(0.1)
+            _rebuild_player_list()
         end
     end)
 
-    cheat.utility.new_heartbeat(function()
-        if not cheat.friend_add_mode then return end
-        if not _friend_add_key_name or _friend_add_key_name == "None" then return end
-        -- Check if the key is held
-        local kc = Enum.KeyCode[_friend_add_key_name]
-        if not kc then return end
-        if not UserInputService:IsKeyDown(kc) then return end
-        -- Raycast from mouse to find player
-        local mousepos = UserInputService:GetMouseLocation()
-        local ray = Camera:ViewportPointToRay(mousepos.X, mousepos.Y)
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = { LocalPlayer.Character }
-        local hit = Workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
-        if hit and hit.Instance then
-            local model = hit.Instance:FindFirstAncestorOfClass("Model")
-            if model then
-                local player = Players:GetPlayerFromCharacter(model)
-                if player and player ~= LocalPlayer then
-                    if not cheat.friends[player.Name] then
-                        cheat.friends[player.Name] = true
-                        _update_friend_list()
-                        Library:Notify({ Title = "Friends", Description = "Added " .. player.Name .. " as friend", Time = 3 })
-                    end
+    -- Standalone GUI: list of all players on server, click to toggle friend status
+    local FRIEND_ACCENT = Color3.fromRGB(220, 100, 100)
+    local FRIEND_BG = Color3.fromRGB(23, 25, 26)
+    local FRIEND_DOCK = Color3.fromRGB(19, 19, 19)
+    local FRIEND_CELL = Color3.fromRGB(28, 28, 30)
+    local FRIEND_CELL_FRIEND = Color3.fromRGB(50, 80, 110)
+    local FRIEND_CELL_HOVER = Color3.fromRGB(40, 40, 44)
+    local FRIEND_BORDER = Color3.fromRGB(70, 70, 70)
+    local FRIEND_TEXT = Color3.fromRGB(230, 230, 230)
+
+    local friend_browser_gui = Instance.new("ScreenGui")
+    friend_browser_gui.Name = "ZalupaFriendBrowser"
+    friend_browser_gui.ResetOnSpawn = false
+    friend_browser_gui.IgnoreGuiInset = true
+    friend_browser_gui.DisplayOrder = 102
+    friend_browser_gui.Enabled = false
+    pcall(function() friend_browser_gui.Parent = game:GetService("CoreGui") end)
+    if not friend_browser_gui.Parent then
+        friend_browser_gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+    if cheat.utility.track_gui then cheat.utility.track_gui(friend_browser_gui) end
+
+    local friend_window = Instance.new("Frame")
+    friend_window.Name = "MainWindow"
+    friend_window.Size = UDim2.fromOffset(420, 480)
+    friend_window.Position = UDim2.new(0.5, -210, 0.5, -240)
+    friend_window.BackgroundColor3 = FRIEND_BG
+    friend_window.BorderSizePixel = 0
+    friend_window.Active = true
+    friend_window.Parent = friend_browser_gui
+
+    local fw_stroke = Instance.new("UIStroke")
+    fw_stroke.Thickness = 1
+    fw_stroke.Color = FRIEND_BORDER
+    fw_stroke.Parent = friend_window
+
+    local fw_corner = Instance.new("UICorner")
+    fw_corner.CornerRadius = UDim.new(0, 6)
+    fw_corner.Parent = friend_window
+
+    local friend_titlebar = Instance.new("Frame")
+    friend_titlebar.Name = "TitleBar"
+    friend_titlebar.Size = UDim2.new(1, 0, 0, 32)
+    friend_titlebar.BackgroundColor3 = FRIEND_DOCK
+    friend_titlebar.BorderSizePixel = 0
+    friend_titlebar.Parent = friend_window
+
+    local ft_corner = Instance.new("UICorner")
+    ft_corner.CornerRadius = UDim.new(0, 6)
+    ft_corner.Parent = friend_titlebar
+
+    local friend_title_label = Instance.new("TextLabel")
+    friend_title_label.BackgroundTransparency = 1
+    friend_title_label.Size = UDim2.new(1, -80, 1, 0)
+    friend_title_label.Position = UDim2.new(0, 12, 0, 0)
+    friend_title_label.Font = Enum.Font.GothamBold
+    friend_title_label.TextSize = 14
+    friend_title_label.TextColor3 = FRIEND_TEXT
+    friend_title_label.TextXAlignment = Enum.TextXAlignment.Left
+    friend_title_label.Text = "Friends — click player to toggle"
+    friend_title_label.Parent = friend_titlebar
+
+    local friend_close_btn = Instance.new("TextButton")
+    friend_close_btn.Size = UDim2.fromOffset(28, 28)
+    friend_close_btn.Position = UDim2.new(1, -32, 0, 2)
+    friend_close_btn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    friend_close_btn.Text = "X"
+    friend_close_btn.Font = Enum.Font.GothamBold
+    friend_close_btn.TextSize = 14
+    friend_close_btn.TextColor3 = Color3.new(1, 1, 1)
+    friend_close_btn.BorderSizePixel = 0
+    friend_close_btn.Parent = friend_titlebar
+    local fcb_corner = Instance.new("UICorner")
+    fcb_corner.CornerRadius = UDim.new(0, 4)
+    fcb_corner.Parent = friend_close_btn
+
+    -- Drag
+    do
+        local dragging, drag_start, start_pos = false, nil, nil
+        friend_titlebar.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = true
+                drag_start = input.Position
+                start_pos = friend_window.Position
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                local delta = input.Position - drag_start
+                friend_window.Position = UDim2.new(
+                    start_pos.X.Scale, start_pos.X.Offset + delta.X,
+                    start_pos.Y.Scale, start_pos.Y.Offset + delta.Y
+                )
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = false
+            end
+        end)
+    end
+
+    friend_close_btn.MouseButton1Click:Connect(function()
+        friend_browser_gui.Enabled = false
+        _friend_browser_visible = false
+    end)
+
+    -- Refresh button
+    local refresh_btn = Instance.new("TextButton")
+    refresh_btn.Size = UDim2.fromOffset(90, 22)
+    refresh_btn.Position = UDim2.new(0, 8, 1, -28)
+    refresh_btn.BackgroundColor3 = FRIEND_CELL
+    refresh_btn.Text = "Refresh"
+    refresh_btn.Font = Enum.Font.Gotham
+    refresh_btn.TextSize = 12
+    refresh_btn.TextColor3 = FRIEND_TEXT
+    refresh_btn.BorderSizePixel = 0
+    refresh_btn.Parent = friend_window
+    local rb_corner = Instance.new("UICorner")
+    rb_corner.CornerRadius = UDim.new(0, 4)
+    rb_corner.Parent = refresh_btn
+    refresh_btn.MouseButton1Click:Connect(function() _rebuild_player_list() end)
+
+    -- Scrollable player list
+    local list_holder = Instance.new("ScrollingFrame")
+    list_holder.Size = UDim2.new(1, -16, 1, -76)
+    list_holder.Position = UDim2.new(0, 8, 0, 40)
+    list_holder.BackgroundTransparency = 1
+    list_holder.BorderSizePixel = 0
+    list_holder.ScrollBarThickness = 4
+    list_holder.ScrollBarImageColor3 = FRIEND_BORDER
+    list_holder.CanvasSize = UDim2.new(0, 0, 0, 0)
+    list_holder.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    list_holder.Parent = friend_window
+
+    local list_layout = Instance.new("UIListLayout")
+    list_layout.SortOrder = Enum.SortOrder.LayoutOrder
+    list_layout.Padding = UDim.new(0, 4)
+    list_layout.Parent = list_holder
+
+    local list_pad = Instance.new("UIPadding")
+    list_pad.PaddingTop = UDim.new(0, 4)
+    list_pad.PaddingBottom = UDim.new(0, 4)
+    list_pad.PaddingLeft = UDim.new(0, 0)
+    list_pad.PaddingRight = UDim.new(0, 0)
+    list_pad.Parent = list_holder
+
+    local _player_rows = {}
+
+    function _rebuild_player_list()
+        for _, row in ipairs(_player_rows) do
+            if row and row.Parent then row:Destroy() end
+        end
+        _player_rows = {}
+        local players = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then table.insert(players, p) end
+        end
+        table.sort(players, function(a, b) return a.Name:lower() < b.Name:lower() end)
+        if #players == 0 then
+            local empty = Instance.new("TextLabel")
+            empty.BackgroundTransparency = 1
+            empty.Size = UDim2.new(1, 0, 0, 22)
+            empty.Font = Enum.Font.Gotham
+            empty.TextSize = 12
+            empty.TextColor3 = Color3.fromRGB(150, 150, 150)
+            empty.Text = "No other players in server"
+            empty.Parent = list_holder
+            table.insert(_player_rows, empty)
+            return
+        end
+        for i, p in ipairs(players) do
+            local is_friend = cheat.friends[p.Name] == true
+            local row = Instance.new("TextButton")
+            row.Size = UDim2.new(1, 0, 0, 28)
+            row.BackgroundColor3 = is_friend and FRIEND_CELL_FRIEND or FRIEND_CELL
+            row.BorderSizePixel = 0
+            row.Text = ""
+            row.AutoButtonColor = false
+            row.LayoutOrder = i
+            row.Parent = list_holder
+            local r_corner = Instance.new("UICorner")
+            r_corner.CornerRadius = UDim.new(0, 4)
+            r_corner.Parent = row
+            local r_stroke = Instance.new("UIStroke")
+            r_stroke.Thickness = 1
+            r_stroke.Color = is_friend and FRIEND_ACCENT or FRIEND_BORDER
+            r_stroke.Parent = row
+            local label = Instance.new("TextLabel")
+            label.BackgroundTransparency = 1
+            label.Size = UDim2.new(1, -36, 1, 0)
+            label.Position = UDim2.new(0, 8, 0, 0)
+            label.Font = Enum.Font.GothamBold
+            label.TextSize = 13
+            label.TextColor3 = FRIEND_TEXT
+            label.TextXAlignment = Enum.TextXAlignment.Left
+            label.Text = (is_friend and "[F] " or "") .. p.Name
+            label.Parent = row
+            local status = Instance.new("TextLabel")
+            status.BackgroundTransparency = 1
+            status.Size = UDim2.new(0, 30, 1, 0)
+            status.Position = UDim2.new(1, -36, 0, 0)
+            status.Font = Enum.Font.Gotham
+            status.TextSize = 12
+            status.TextColor3 = is_friend and Color3.fromRGB(120, 220, 120) or Color3.fromRGB(160, 160, 160)
+            status.TextXAlignment = Enum.TextXAlignment.Right
+            status.Text = is_friend and "FRIEND" or "click"
+            status.Parent = row
+
+            row.MouseEnter:Connect(function()
+                if cheat.friends[p.Name] then return end
+                row.BackgroundColor3 = FRIEND_CELL_HOVER
+            end)
+            row.MouseLeave:Connect(function()
+                row.BackgroundColor3 = cheat.friends[p.Name] and FRIEND_CELL_FRIEND or FRIEND_CELL
+            end)
+
+            row.MouseButton1Click:Connect(function()
+                if cheat.friends[p.Name] then
+                    cheat.friends[p.Name] = nil
+                    Library:Notify({ Title = "Friends", Description = "Removed " .. p.Name, Time = 3 })
+                else
+                    cheat.friends[p.Name] = true
+                    Library:Notify({ Title = "Friends", Description = "Added " .. p.Name .. " as friend", Time = 3 })
                 end
+                _update_friend_list()
+                _rebuild_player_list()
+            end)
+            table.insert(_player_rows, row)
+        end
+        list_holder.CanvasSize = UDim2.new(0, 0, 0, #players * 32 + 8)
+    end
+
+    FriendGroup:AddButton("open_friend_browser", {
+        Text = "Open Friend Browser",
+        Callback = function()
+            friend_browser_gui.Enabled = not friend_browser_gui.Enabled
+            _friend_browser_visible = friend_browser_gui.Enabled
+            if friend_browser_gui.Enabled then
+                _rebuild_player_list()
             end
         end
-    end)
+    })
 
-    -- Helper: check if a player is a friend
-    cheat.is_friend = function(player)
-        if not player then return false end
-        return cheat.friends[player.Name] == true
-    end
+    -- cheat.is_friend already defined in BLOCK 04a
 end)()
 
 -- ═══════════════════════════════════════════════════════════════════════════
