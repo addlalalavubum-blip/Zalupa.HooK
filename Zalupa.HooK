@@ -1055,7 +1055,7 @@ ExtraGroup:AddSlider("TracerLife", { Text = "Tracer Lifetime", Min = 1, Max = 50
 ExtraGroup:AddSlider("ShootSpeed", { Text = "Shoot Speed Mult", Min = 1, Max = 30, Rounding = 1, Default = 10, Callback = function(v) shootspeed = v / 10 end })
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- [BLOCK 06] INVENTORY CHECKER
+-- [BLOCK 06] INVENTORY CHECKER (Lirp Delta port — absolute positions, no draggable containers)
 -- ═══════════════════════════════════════════════════════════════════════════
 local InvGroup = Tabs.Combat:AddLeftGroupbox(L("grp_inventory"))
 local InvToggle = InvGroup:AddToggle("InvChecker", {
@@ -1087,30 +1087,6 @@ InvTargetToggle:AddColorPicker("InvCheckTargetColor", {
     Callback = function(v) invcheck.targetColor = v end
 })
 
--- ═══════════════════════════════════════════════════════════════════════════
--- [BLOCK 06] INVENTORY CHECKER — ported EXACTLY from Lirp (r52_0 / r92_0 / r93_0 /
--- r94_0 / r95_0 / r96_0). All slots parented directly to the ScreenGui (no draggable
--- containers). Positions computed from AbsoluteSize.X (viewport width) once at init.
--- UICorner is intentionally OMITTED (per dj's request — "только скругление убери").
---
--- Lirp layout (kept point-for-point):
---   mainSlots   [1..12]  ImageLabel  60×60   RGB(30,30,30)        transparency 0.25
---       • slots 1-3 → weapons (X step 85,  centered via (W-960)/2)
---       • slots 4-12 → clothing (X step 80, centered via (W-935)/2)
---   attachSlots [1..12]  ImageLabel  25×20   colored by weapon group    transparency 0.20  ZIndex 2
---       • 1-4   red   RGB(155,20,30)   X step 21, centered via (W-985)/2
---       • 5-8   blue  RGB(30,50,155)   X step 21, centered via (W-980)/2
---       • 9-12  green RGB(50,155,30)   X step 21, centered via (W-975)/2
---   fullSlots   [1..54]  ImageLabel  35×35   RGB(0,0,0)          transparency 0.35
---   fullCounts  [1..54]  TextLabel   20×15   transparent BG, white text, TextScaled=true
---       • 6 per row × 9 rows; X step 40, Y step 40, start Y=100 (count Y = slot Y + 24)
---       • X = (W+500)/2 + (col)*40    (slot)
---       • X = (W+518)/2 + (col)*40    (count, offset +9 from slot)
---   infoLabel (r56_0):  Size (0.19,0,0.03,0)  Pos (0.5,0,0.08,0)  Anchor (0.5,0.5)
---                       TextScaled, GothamSemibold, white, transparent BG
--- Visibility: VisibilityToggle(show) iterates slots; full grid gated by invcheck.fullInventory
--- ═══════════════════════════════════════════════════════════════════════════
-
 local alenInvGui = Instance.new("ScreenGui")
 alenInvGui.Name = "ZalupaStatsViewer"
 alenInvGui.ResetOnSpawn = false
@@ -1122,21 +1098,20 @@ if not alenInvGui.Parent then alenInvGui.Parent = LocalPlayer:WaitForChild("Play
 cheat.utility.track_gui(alenInvGui)
 
 local EMPTY_ICON = "rbxassetid://12459616555"
-local _screenW = Camera.ViewportSize.X
 
--- r56_0 port: "Viewing Name | Corpse | $value" label (anchored top-center, scaled to screen %)
+-- Info label (top center, scaled to screen)
 local infoLabel = Instance.new("TextLabel", alenInvGui)
 infoLabel.Size = UDim2.new(0.19, 0, 0.03, 0)
 infoLabel.Position = UDim2.new(0.5, 0, 0.08, 0)
 infoLabel.AnchorPoint = Vector2.new(0.5, 0.5)
 infoLabel.BackgroundTransparency = 1
-infoLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+infoLabel.TextColor3 = invcheck.targetColor
 infoLabel.Font = Enum.Font.GothamSemibold
 infoLabel.Visible = false
 infoLabel.TextScaled = true
 infoLabel.Text = ""
 
--- r92_0: main slots (12 cells, 60×60, RGB(30,30,30), transparency 0.25)
+-- Main slots: 12 cells (60x60), weapons 1-3, clothing 4-12
 local mainSlots = {}
 for i = 1, 12 do
     local img = Instance.new("ImageLabel", alenInvGui)
@@ -1144,15 +1119,16 @@ for i = 1, 12 do
     img.Size = UDim2.new(0, 60, 0, 60)
     img.BackgroundTransparency = 0.25
     img.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    Instance.new("UICorner", img).CornerRadius = UDim.new(0, 12)
     if i <= 3 then
-        img.Position = UDim2.new(0, (_screenW - 135 - 825) / 2 + (i - 1) * 85, 0, 0)
+        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 825) / 2 + (i - 1) * 85, 0, 0)
     else
-        img.Position = UDim2.new(0, (_screenW - 135 - 800) / 2 + (i - 1) * 80, 0, 0)
+        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 800) / 2 + (i - 1) * 80, 0, 0)
     end
     mainSlots[i] = img
 end
 
--- r95_0: attachment slots (12 cells, 25×20, color by weapon group, transparency 0.2, ZIndex 2)
+-- Attachment slots: 12 cells (25x20), colored by weapon group
 local attachSlots = {}
 for i = 1, 12 do
     local img = Instance.new("ImageLabel", alenInvGui)
@@ -1160,20 +1136,21 @@ for i = 1, 12 do
     img.Size = UDim2.new(0, 25, 0, 20)
     img.BackgroundTransparency = 0.2
     img.ZIndex = 2
+    Instance.new("UICorner", img).CornerRadius = UDim.new(0, 9)
     if i <= 4 then
-        img.Position = UDim2.new(0, (_screenW - 135 - 850) / 2 + (i - 1) * 21, 0, 55)
+        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 850) / 2 + (i - 1) * 21, 0, 55)
         img.BackgroundColor3 = Color3.fromRGB(155, 20, 30)
     elseif i <= 8 then
-        img.Position = UDim2.new(0, (_screenW - 135 - 845) / 2 + (i - 1) * 21, 0, 55)
+        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 845) / 2 + (i - 1) * 21, 0, 55)
         img.BackgroundColor3 = Color3.fromRGB(30, 50, 155)
     else
-        img.Position = UDim2.new(0, (_screenW - 135 - 840) / 2 + (i - 1) * 21, 0, 55)
+        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 840) / 2 + (i - 1) * 21, 0, 55)
         img.BackgroundColor3 = Color3.fromRGB(50, 155, 30)
     end
     attachSlots[i] = img
 end
 
--- r93_0 / r94_0: full inventory grid (54 cells + 54 count labels)
+-- Full inventory grid: 54 cells (35x35) + 54 count labels
 local fullSlots, fullCounts = {}, {}
 for i = 1, 54 do
     local img = Instance.new("ImageLabel", alenInvGui)
@@ -1181,7 +1158,7 @@ for i = 1, 54 do
     img.Size = UDim2.new(0, 35, 0, 35)
     img.BackgroundTransparency = 0.35
     img.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-
+    Instance.new("UICorner", img).CornerRadius = UDim.new(0, 12)
     local txt = Instance.new("TextLabel", alenInvGui)
     txt.Visible = true
     txt.Text = ""
@@ -1189,8 +1166,8 @@ for i = 1, 54 do
     txt.Size = UDim2.new(0, 20, 0, 15)
     txt.BackgroundTransparency = 1
     txt.TextColor3 = Color3.fromRGB(255, 255, 255)
-
-    -- Lirp position formula: 6 per row × 9 rows, X step 40, Y step 40 (count Y = slot Y + 24)
+    Instance.new("UICorner", txt).CornerRadius = UDim.new(0, 12)
+    -- Lirp position: 6 per row x 9 rows, X step 40, Y step 40
     local row, col
     if     i <=  6 then row, col = 0, i - 1
     elseif i <= 12 then row, col = 1, i - 7
@@ -1201,18 +1178,17 @@ for i = 1, 54 do
     elseif i <= 42 then row, col = 6, i - 37
     elseif i <= 48 then row, col = 7, i - 43
     else                 row, col = 8, i - 49 end
-    img.Position = UDim2.new(0, (_screenW + 500) / 2 + col * 40, 0, 100 + row * 40)
-    txt.Position = UDim2.new(0, (_screenW + 518) / 2 + col * 40, 0, 124 + row * 40)
-
+    img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - -900 - 400) / 2 + col * 40, 0, 100 + row * 40)
+    txt.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - -918 - 400) / 2 + col * 40, 0, 124 + row * 40)
     fullSlots[i] = img
     fullCounts[i] = txt
 end
 
--- r96_0.LastVisibility + VisibilityToggle — replaces updateInvVisibility
-local _inv_last_visibility = false
+-- Visibility toggle (Lirp style)
+local _inv_last_vis = false
 local function VisibilityToggle(show)
-    if show == _inv_last_visibility then return end
-    _inv_last_visibility = show
+    if show == _inv_last_vis then return end
+    _inv_last_vis = show
     local fullShow = show and invcheck.fullInventory or false
     for i = 1, 12 do
         mainSlots[i].Visible = show
@@ -1232,10 +1208,6 @@ local function getInvContainer(target)
     return plrFolder and plrFolder:FindFirstChild("Inventory")
 end
 
--- Lirp r97_0 port: render target's inventory into the flat grid.
--- Weapons fill mainSlots[1..3], clothing fills mainSlots[4..12].
--- Each weapon's 4 attachments go into attachSlots[offset+1..offset+4]
--- where offset = 0,4,8 for weapons 1,2,3 respectively.
 local function populateInvData(target)
     if not target or target.Name == LocalPlayer.Name then return end
     local itemsList = getInvItemsList()
@@ -1245,18 +1217,12 @@ local function populateInvData(target)
     invCache.lastFullInventory = invcheck.fullInventory
     local inventory = getInvContainer(target)
     if not inventory then return end
-    -- Clear top + attach rows
     for i = 1, 12 do mainSlots[i].Image = EMPTY_ICON end
     for i = 1, 12 do attachSlots[i].Image = EMPTY_ICON end
-    -- Clear full grid
-    for i = 1, 54 do
-        fullSlots[i].Image = EMPTY_ICON
-        fullCounts[i].Text = ""
-    end
-    -- Lirp indices
-    local weaponIdx = 1     -- mainSlots[1..3]
-    local clothingIdx = 4   -- mainSlots[4..12]
-    local attachOffset = 0  -- attachSlots base offset (0 → 4 → 8)
+    for i = 1, 54 do fullSlots[i].Image = EMPTY_ICON; fullCounts[i].Text = "" end
+    local weaponIdx = 1
+    local clothingIdx = 4
+    local attachOffset = 0
     for _, item in pairs(inventory:GetChildren()) do
         local slot = item:GetAttribute("Slot")
         if slot and slot:find("Clothing") then
@@ -1289,7 +1255,6 @@ local function populateInvData(target)
             end
         end
     end
-    -- Full inventory grid (Lirp r97_0 second pass)
     if invcheck.fullInventory then
         local idx = 1
         for _, container in pairs(inventory:GetChildren()) do
@@ -1313,11 +1278,6 @@ local function populateInvData(target)
     end
 end
 
--- Lirp r98_0 port: total ruble-equivalent value of target's inventory.
--- For each Clothing-slot container's nested Inventory items:
---   Rubles → add Amount directly
---   Else   → ItemProperties.Price × multiplier by ItemType (Extra .4, Ammo .7×Amount, Clothing .35, Medical .75, Barter .4)
--- Only counts items with Price >= 10.
 local function getInvValue(target)
     if invCache.lastTargetValueName == target then return invCache.lastTargetValue end
     local itemsList = getInvItemsList()
@@ -1355,44 +1315,22 @@ local function getInvValue(target)
     return math.floor(total)
 end
 
--- Lirp r101_0 port: pick which target to inspect.
--- LastTarget = silent_aim.target_part.Parent (the aimbot's current victim).
---   • No LastTarget       → find closest live player to crosshair
---   • LastTarget has Head → still find closest live player (overwrites)
---   • LastTarget no Head  → return LastTarget directly (dead target = treat as corpse)
--- Then if "Check Corpses" is on, also iterate Workspace.DroppedItems for the
--- closest corpse (Humanoid + Head + no AttackedBy); closest of player/corpse wins.
 local function getInvTarget()
     local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     local best, bestDist = nil, 1000
-    local lastTarget = silent_aim.target_part and silent_aim.target_part.Parent
-
-    local function find_closest_player()
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and plr.Character then
-                local char = plr.Character
-                local head = char:FindFirstChild("Head")
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                local aimPart = char:FindFirstChild(silent_aim.part or "Head")
-                if head and hum and hum.Health > 0 and aimPart then
-                    local pos, onScreen = Camera:WorldToViewportPoint(aimPart.Position)
-                    if onScreen and pos.Z > 0 then
-                        local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
-                        if d < bestDist then bestDist = d; best = plr end
-                    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local head = plr.Character:FindFirstChild("Head")
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if head and hum and hum.Health > 0 then
+                local pos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                if onScreen and pos.Z > 0 then
+                    local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+                    if d < bestDist then bestDist = d; best = plr end
                 end
             end
         end
     end
-
-    if not lastTarget then
-        find_closest_player()
-    elseif lastTarget:FindFirstChild("Head") then
-        find_closest_player()
-    else
-        return lastTarget  -- aimbot's dead target — return it as a corpse directly
-    end
-
     if invcheck.showCorpse then
         local dropped = Workspace:FindFirstChild("DroppedItems")
         if dropped then
@@ -1434,10 +1372,8 @@ cheat.utility.new_heartbeat(function(delta)
     VisibilityToggle(true)
     _inv_was_visible = true
     if invcheck.showTarget then
-        -- Lirp label format: "Viewing <Name> | <Corpse|Inventory> | $<value>"
-        local suffix = " | Inventory"
-        if target:FindFirstChild("Head") then suffix = " | Corpse" end
-        local labelText = "Viewing " .. target.Name .. suffix
+        local labelText = target.Name
+        if target:FindFirstChild("Humanoid") then labelText = labelText .. " [CORPSE]" end
         if invcheck.showValue then labelText = labelText .. " | $" .. getInvValue(target) end
         infoLabel.Text = labelText
         infoLabel.TextColor3 = invcheck.targetColor
@@ -1447,7 +1383,6 @@ cheat.utility.new_heartbeat(function(delta)
     end
 end)
 
--- ═══════════════════════════════════════════════════════════════════════════
 -- [BLOCK 07] CUSTOM SOUNDS
 -- ═══════════════════════════════════════════════════════════════════════════
 local SoundGroup = Tabs.Settings:AddLeftGroupbox(L("grp_sounds"))
@@ -1983,6 +1918,24 @@ cheat.EspLibrary = {} do
             local name_str = player.Name
             if not isnpc and settings.high_kd_marker and plr._kd_is_cheater then
                 name_str = "[CHEATER] " .. name_str
+            end
+            -- Staff Detector: show [MOD] prefix for detected staff
+            if not isnpc and cheat.staff_detected and cheat.staff_detected[player] then
+                local sd_info = cheat.staff_detected[player]
+                local sd_prefix = "[MOD] "
+                local sd_color = Color3.fromRGB(255, 80, 80)
+                if sd_info.type == "tester" then
+                    sd_prefix = "[TESTER] "
+                    sd_color = Color3.fromRGB(100, 200, 255)
+                elseif sd_info.type == "content_creator" then
+                    sd_prefix = "[CREATOR] "
+                    sd_color = Color3.fromRGB(255, 200, 100)
+                elseif sd_info.type == "alt_mod" then
+                    sd_prefix = "[MOD?] "
+                    sd_color = Color3.fromRGB(255, 150, 50)
+                end
+                name_str = sd_prefix .. name_str
+                realname.Color = sd_color
             end
             realname.Text = name_str
 
@@ -5710,7 +5663,9 @@ task.spawn(function()
                         return old(...)
                     end, true)
                     new_hook(gc.update, function(old, ...)
-                        if nobob then return Vector3.zero end
+                        -- nobob handled by Check 1 (spring-specific hooks above)
+                        -- which checks bob_spring_names[s_name] to only zero bob springs.
+                        -- This old-style hook must NOT zero ALL springs or it breaks recoil/aim.
                         return old(...)
                     end, true)
                 end
@@ -7711,8 +7666,9 @@ end)()
 -- [BLOCK 15c] MISC TAB — Fake Map (ported from swimhub)
 -- Добавляет фейковые DAGR/GPS, EstonianBorderMap, Pathfinder/Compass в инвентарь,
 -- чтобы ты всегда видел свою позицию/карту/компас в игре.
+-- IIFE для изоляции регистров (Luau limit 200 locals/function)
 -- ═══════════════════════════════════════════════════════════════════════════
-do
+;(function()
     local FakeMapGroup = Tabs.Misc:AddLeftGroupbox("Fake Map")
     local fake_map_owned = {}
 
@@ -7779,16 +7735,19 @@ do
             end
         })
     end
-end
+end)()
 
 -- ═══════════════════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- cheat.staff_detected: таблица для ESP интеграции
+cheat.staff_detected = cheat.staff_detected or {}
+
 -- [BLOCK 15d] MISC TAB — Staff Detector (Mod/Tester/Content Creator detector)
 -- Детектор администрации: по группам + поведенческий анализ альтов
 -- Ловит модеров, тестеров и контент-мейкеров, включая тех кто на альтах без групп
 -- ═══════════════════════════════════════════════════════════════════════════
-do
+;(function()
     local StaffDetectorGroup = Tabs.Misc:AddLeftGroupbox("Staff Detector")
 
     local SD_GROUP_ID = 3765739
@@ -7947,7 +7906,7 @@ do
             reasons[#reasons + 1] = "Naked"
         end
 
-        if data.still_time and data.still_time >= 8 then
+        if data.still_time and data.still_time >= 12 then
             score = score + 1
             reasons[#reasons + 1] = "Passive"
         end
@@ -7985,9 +7944,25 @@ do
                     content_creator = "[CREATOR]",
                     mod = "[MOD]",
                 }
+                cheat.staff_detected[player] = { type = gtype, role = grole }
+                local icons = {
+                    tester = "[TESTER]",
+                    content_creator = "[CREATOR]",
+                    mod = "[MOD]",
+                }
+                local ru_titles = {
+                    tester = "[ТЕСТЕР]",
+                    content_creator = "[КРЕАТОР]",
+                    mod = "[МОДЕРАТОР]",
+                }
+                local icon_str = (current_lang == "RU" and (ru_titles[gtype] or "[СТАФФ]"))
+                               or (icons[gtype] or "[STAFF]")
+                local desc = (current_lang == "RU")
+                    and (icon_str .. " " .. player.Name .. " зашёл на сервер — " .. grole)
+                    or (icon_str .. " " .. player.Name .. " joined — " .. grole)
                 Library:Notify({
-                    Title = "Staff Detector",
-                    Description = (icons[gtype] or "[STAFF]") .. " " .. player.Name .. " joined — " .. grole,
+                    Title = (current_lang == "RU") and "Детектор персонала" or "Staff Detector",
+                    Description = desc,
                     Time = 10,
                 })
                 task.spawn(function()
@@ -8040,11 +8015,15 @@ do
         sd_connections.player_removing = Players.PlayerRemoving:Connect(function(player)
             local data = sd_player_data[player]
             if data and data.group_type then
+                local leave_desc = (current_lang == "RU")
+                    and (player.Name .. " (" .. (data.group_role or data.group_type) .. ") вышел")
+                    or (player.Name .. " (" .. (data.group_role or data.group_type) .. ") left")
                 Library:Notify({
-                    Title = "Staff Detector",
-                    Description = player.Name .. " (" .. (data.group_role or data.group_type) .. ") left",
+                    Title = (current_lang == "RU") and "Детектор персонала" or "Staff Detector",
+                    Description = leave_desc,
                     Time = 5,
                 })
+                cheat.staff_detected[player] = nil
             end
             sd_player_data[player] = nil
         end)
@@ -8097,10 +8076,15 @@ do
                     -- 100% стафф на альте (красное + звук)
                     if data.notified ~= "confirmed" then
                         data.notified = "confirmed"
+                        cheat.staff_detected[player] = { type = "alt_mod", role = "Behavioral" }
+                        local conf_desc = (current_lang == "RU")
+                            and ("ПОДТВЕРЖДЁННЫЙ СТАФФ-АЛЬТ: " .. player.Name
+                                .. " (" .. table.concat(reasons, ", ") .. ")")
+                            or ("CONFIRMED STAFF ALT: " .. player.Name
+                                .. " (" .. table.concat(reasons, ", ") .. ")")
                         Library:Notify({
-                            Title = "Staff Detector",
-                            Description = "CONFIRMED STAFF ALT: " .. player.Name
-                                .. " (" .. table.concat(reasons, ", ") .. ")",
+                            Title = (current_lang == "RU") and "Детектор персонала" or "Staff Detector",
+                            Description = conf_desc,
                             Time = 15,
                         })
                         task.spawn(function()
@@ -8112,17 +8096,21 @@ do
                             game:GetService("Debris"):AddItem(s, 5)
                         end)
                     end
-                elseif score >= 3 then
-                    -- Подозрительный (жёлтое)
+                elseif score >= 4 and has_inv then
+                    -- Подозрительный (жёлтое) — нужен Invisible + минимум 2 других триггера
                     -- Invisible(2) + Passive(1) = 3 (модер с дефолтным ножом)
                     -- Invisible(2) + Naked(1) = 3 (тестер на альте)
                     -- Invisible(2) + NoTag(1) = 3 и т.д.
                     if data.notified ~= "suspicious" then
                         data.notified = "suspicious"
+                        local susp_desc = (current_lang == "RU")
+                            and ("Подозрительный: " .. player.Name
+                                .. " (" .. score .. " баллов: " .. table.concat(reasons, ", ") .. ")")
+                            or ("Suspicious: " .. player.Name
+                                .. " (" .. score .. " pts: " .. table.concat(reasons, ", ") .. ")")
                         Library:Notify({
-                            Title = "Staff Detector",
-                            Description = "Suspicious: " .. player.Name
-                                .. " (" .. score .. " pts: " .. table.concat(reasons, ", ") .. ")",
+                            Title = (current_lang == "RU") and "Детектор персонала" or "Staff Detector",
+                            Description = susp_desc,
                             Time = 10,
                         })
                     end
@@ -8146,6 +8134,9 @@ do
         end
         sd_connections = {}
         sd_player_data = {}
+        if cheat.staff_detected then
+            table.clear(cheat.staff_detected)
+        end
     end
 
     StaffDetectorGroup:AddToggle("staff_detector_on", {
@@ -8168,7 +8159,7 @@ do
             end
         })
     end
-end
+end)()
 
 -- [BLOCK 16] FINAL INIT
 -- ═══════════════════════════════════════════════════════════════════════════
