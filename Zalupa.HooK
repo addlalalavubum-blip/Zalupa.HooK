@@ -162,6 +162,7 @@ local silent_aim = {
     nospread = false, target_npc = false, target_heli = false,
     testwallbang = false,
     wallcheck = false,
+    magic_bullet = false,
     triggerbot = false, triggerbot_manipulation = false,
     corner_shoot = false, corner_shoot_dist = 5,
     manipulated = false, manipulated_origin = nil,
@@ -252,11 +253,15 @@ local invcheck = {
     fullInventory = false, showCorpse = false,
     showValue = false, showTarget = false,
     targetColor = Color3.fromRGB(255, 255, 255),
+    mainScale = 1, fullScale = 1
 }
 local invCache = {
     lastTargetInventory = nil, lastFullInventory = nil,
     lastTargetValueName = nil, lastTargetValue = 0,
 }
+
+-- Forward declarations for inv viewer scale objects (defined in BLOCK 06)
+local mainScaleObj, fullScaleObj
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- [BLOCK 04] UTILITIES (диспетчеры)
@@ -1055,7 +1060,9 @@ ExtraGroup:AddSlider("TracerLife", { Text = "Tracer Lifetime", Min = 1, Max = 50
 ExtraGroup:AddSlider("ShootSpeed", { Text = "Shoot Speed Mult", Min = 1, Max = 30, Rounding = 1, Default = 10, Callback = function(v) shootspeed = v / 10 end })
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- [BLOCK 06] INVENTORY CHECKER (Lirp Delta port — absolute positions, no draggable containers)
+-- [BLOCK 06] INVENTORY CHECKER (v8 port — draggable frames, right-center main / left backpack)
+-- Layout: weapons+clothing+armor+helmet on the RIGHT side of viewport center,
+--         backpack (full inv grid) on the LEFT side. Both vertically centered.
 -- ═══════════════════════════════════════════════════════════════════════════
 local InvGroup = Tabs.Combat:AddLeftGroupbox(L("grp_inventory"))
 local InvToggle = InvGroup:AddToggle("InvChecker", {
@@ -1086,6 +1093,14 @@ InvTargetToggle:AddColorPicker("InvCheckTargetColor", {
     Title = "Target Text Color", Default = Color3.fromRGB(255, 255, 255),
     Callback = function(v) invcheck.targetColor = v end
 })
+InvGroup:AddSlider("InvMainScale", { Text = "Main Inv Scale", Min = 0.5, Max = 2, Rounding = 2, Default = 1, Callback = function(v)
+    invcheck.mainScale = v
+    if mainScaleObj then mainScaleObj.Scale = v end
+end })
+InvGroup:AddSlider("InvFullScale", { Text = "Full Inv Scale", Min = 0.5, Max = 2, Rounding = 2, Default = 1, Callback = function(v)
+    invcheck.fullScale = v
+    if fullScaleObj then fullScaleObj.Scale = v end
+end })
 
 local alenInvGui = Instance.new("ScreenGui")
 alenInvGui.Name = "ZalupaStatsViewer"
@@ -1099,105 +1114,151 @@ cheat.utility.track_gui(alenInvGui)
 
 local EMPTY_ICON = "rbxassetid://12459616555"
 
--- Info label (top center, scaled to screen)
-local infoLabel = Instance.new("TextLabel", alenInvGui)
-infoLabel.Size = UDim2.new(0.19, 0, 0.03, 0)
-infoLabel.Position = UDim2.new(0.5, 0, 0.08, 0)
-infoLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+-- Draggable frame helper (ported from v8) — BackgroundTransparency=1 frames capture clicks via Active=true + InputBegan
+-- Handles AnchorPoint correctly by recomputing Position on each delta.
+local function makeDraggable(frame)
+    local dragging, dragInput, dragStart, startPos
+    frame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    frame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            -- Drop AnchorPoint while dragging so position math is straightforward.
+            -- The frame will still appear in the same place because we preserve the
+            -- screen-space pixel position via the offset change.
+            local ap = frame.AnchorPoint
+            if ap and (ap.X ~= 0 or ap.Y ~= 0) then
+                -- Convert current anchor-based position to top-left anchored position
+                local abs = frame.AbsolutePosition
+                local sz = frame.AbsoluteSize
+                local vp = frame.Parent and frame.Parent.AbsoluteSize or Vector2.new(workspace.CurrentCamera.ViewportSize.X, workspace.CurrentCamera.ViewportSize.Y)
+                frame.AnchorPoint = Vector2.new(0, 0)
+                frame.Position = UDim2.new(0, abs.X, 0, abs.Y)
+                startPos = frame.Position
+                dragStart = input.Position
+            end
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+
+-- MAIN INVENTORY (weapons + clothing + armor + helmet) — RIGHT side of screen
+-- Size 235x520. Position: anchored to the right edge of viewport, vertically centered.
+-- Using Scale 1.0 (right-aligned to viewport right) with offset -260 to push it 260px from the right edge.
+local mainContainer = Instance.new("Frame", alenInvGui)
+mainContainer.Name = "MainInv"
+mainContainer.Size = UDim2.new(0, 235, 0, 520)
+mainContainer.AnchorPoint = Vector2.new(1, 0.5)  -- right-center anchor
+mainContainer.Position = UDim2.new(1, -30, 0.5, 0)  -- 30px from right edge, vertically centered
+mainContainer.BackgroundTransparency = 1
+mainContainer.Visible = false
+mainContainer.Active = true
+makeDraggable(mainContainer)
+mainScaleObj = Instance.new("UIScale", mainContainer)
+mainScaleObj.Scale = invcheck.mainScale
+
+-- Info label above main inv
+local infoLabel = Instance.new("TextLabel", mainContainer)
+infoLabel.Size = UDim2.new(1, 0, 0, 30)
+infoLabel.Position = UDim2.new(0, 0, 0, -35)
 infoLabel.BackgroundTransparency = 1
 infoLabel.TextColor3 = invcheck.targetColor
-infoLabel.Font = Enum.Font.GothamSemibold
-infoLabel.Visible = false
-infoLabel.TextScaled = true
+infoLabel.Font = Enum.Font.GothamBold
+infoLabel.TextSize = 18
+infoLabel.TextStrokeTransparency = 0.5
+infoLabel.TextStrokeColor3 = Color3.new(0,0,0)
 infoLabel.Text = ""
 
--- Main slots: 12 cells (60x60), weapons 1-3, clothing 4-12
+-- Main grid: 12 cells of 65x130 (item icon 65x65 + 4 attachment slots 28x28 below)
+-- 3 columns × 4 rows. Slots 1-3 = weapons, 4-12 = clothing/armor/helmet/backpack.
+local mainGrid = Instance.new("UIGridLayout", mainContainer)
+mainGrid.CellSize = UDim2.new(0, 65, 0, 130)
+mainGrid.CellPadding = UDim2.new(0, 10, 0, 10)
+mainGrid.FillDirectionMaxCells = 3
+mainGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
 local mainSlots = {}
 for i = 1, 12 do
-    local img = Instance.new("ImageLabel", alenInvGui)
-    img.Visible = false
-    img.Size = UDim2.new(0, 60, 0, 60)
-    img.BackgroundTransparency = 0.25
-    img.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    Instance.new("UICorner", img).CornerRadius = UDim.new(0, 12)
-    if i <= 3 then
-        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 825) / 2 + (i - 1) * 85, 0, 0)
-    else
-        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 800) / 2 + (i - 1) * 80, 0, 0)
+    local slotFrame = Instance.new("Frame", mainContainer)
+    slotFrame.BackgroundTransparency = 1
+    local itemImg = Instance.new("ImageLabel", slotFrame)
+    itemImg.Size = UDim2.new(0, 65, 0, 65)
+    itemImg.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    itemImg.BackgroundTransparency = 0.3
+    local attachFrame = Instance.new("Frame", slotFrame)
+    attachFrame.Size = UDim2.new(0, 65, 0, 45)
+    attachFrame.Position = UDim2.new(0, 0, 0, 70)
+    attachFrame.BackgroundTransparency = 1
+    local attachGrid = Instance.new("UIGridLayout", attachFrame)
+    attachGrid.CellSize = UDim2.new(0, 28, 0, 28)
+    attachGrid.CellPadding = UDim2.new(0, 3, 0, 3)
+    attachGrid.FillDirectionMaxCells = 2
+    attachGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    local attachSlots = {}
+    for j = 1, 4 do
+        local aImg = Instance.new("ImageLabel", attachFrame)
+        aImg.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        aImg.BackgroundTransparency = 0.3
+        attachSlots[j] = aImg
     end
-    mainSlots[i] = img
+    mainSlots[i] = { Frame = slotFrame, Item = itemImg, Attach = attachSlots }
 end
 
--- Attachment slots: 12 cells (25x20), colored by weapon group
-local attachSlots = {}
-for i = 1, 12 do
-    local img = Instance.new("ImageLabel", alenInvGui)
-    img.Visible = false
-    img.Size = UDim2.new(0, 25, 0, 20)
-    img.BackgroundTransparency = 0.2
-    img.ZIndex = 2
-    Instance.new("UICorner", img).CornerRadius = UDim.new(0, 9)
-    if i <= 4 then
-        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 850) / 2 + (i - 1) * 21, 0, 55)
-        img.BackgroundColor3 = Color3.fromRGB(155, 20, 30)
-    elseif i <= 8 then
-        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 845) / 2 + (i - 1) * 21, 0, 55)
-        img.BackgroundColor3 = Color3.fromRGB(30, 50, 155)
-    else
-        img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - 135 - 840) / 2 + (i - 1) * 21, 0, 55)
-        img.BackgroundColor3 = Color3.fromRGB(50, 155, 30)
-    end
-    attachSlots[i] = img
-end
+-- FULL INVENTORY (backpack) — TOP center, above the main inventory area
+-- Size 360x240. Position: top of screen, horizontally centered.
+-- (0.5, -180, 0, 30) → centered horizontally (360/2 = 180 left offset), 30px from top.
+local fullContainer = Instance.new("Frame", alenInvGui)
+fullContainer.Name = "FullInv"
+fullContainer.Size = UDim2.new(0, 360, 0, 240)
+fullContainer.Position = UDim2.new(0.5, -180, 0, 30)
+fullContainer.BackgroundTransparency = 1
+fullContainer.Visible = false
+fullContainer.Active = true
+makeDraggable(fullContainer)
+fullScaleObj = Instance.new("UIScale", fullContainer)
+fullScaleObj.Scale = invcheck.fullScale
 
--- Full inventory grid: 54 cells (35x35) + 54 count labels
+local fullGrid = Instance.new("UIGridLayout", fullContainer)
+fullGrid.CellSize = UDim2.new(0, 35, 0, 35)
+fullGrid.CellPadding = UDim2.new(0, 5, 0, 5)
+fullGrid.FillDirectionMaxCells = 9
+fullGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
 local fullSlots, fullCounts = {}, {}
 for i = 1, 54 do
-    local img = Instance.new("ImageLabel", alenInvGui)
-    img.Visible = false
-    img.Size = UDim2.new(0, 35, 0, 35)
-    img.BackgroundTransparency = 0.35
-    img.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    Instance.new("UICorner", img).CornerRadius = UDim.new(0, 12)
-    local txt = Instance.new("TextLabel", alenInvGui)
-    txt.Visible = true
-    txt.Text = ""
-    txt.TextScaled = true
-    txt.Size = UDim2.new(0, 20, 0, 15)
+    local fImg = Instance.new("ImageLabel", fullContainer)
+    fImg.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    fImg.BackgroundTransparency = 0.3
+    local txt = Instance.new("TextLabel", fImg)
+    txt.Size = UDim2.new(1, 0, 1, 0)
     txt.BackgroundTransparency = 1
     txt.TextColor3 = Color3.fromRGB(255, 255, 255)
-    Instance.new("UICorner", txt).CornerRadius = UDim.new(0, 12)
-    -- Lirp position: 6 per row x 9 rows, X step 40, Y step 40
-    local row, col
-    if     i <=  6 then row, col = 0, i - 1
-    elseif i <= 12 then row, col = 1, i - 7
-    elseif i <= 18 then row, col = 2, i - 13
-    elseif i <= 24 then row, col = 3, i - 19
-    elseif i <= 30 then row, col = 4, i - 25
-    elseif i <= 36 then row, col = 5, i - 31
-    elseif i <= 42 then row, col = 6, i - 37
-    elseif i <= 48 then row, col = 7, i - 43
-    else                 row, col = 8, i - 49 end
-    img.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - -900 - 400) / 2 + col * 40, 0, 100 + row * 40)
-    txt.Position = UDim2.new(0, (alenInvGui.AbsoluteSize.X - -918 - 400) / 2 + col * 40, 0, 124 + row * 40)
-    fullSlots[i] = img
+    txt.Font = Enum.Font.GothamBold
+    txt.TextSize = 10
+    txt.TextStrokeTransparency = 0.5
+    txt.TextStrokeColor3 = Color3.new(0,0,0)
+    txt.Text = ""
+    txt.ZIndex = 2
+    fullSlots[i] = fImg
     fullCounts[i] = txt
 end
 
--- Visibility toggle (Lirp style)
-local _inv_last_vis = false
-local function VisibilityToggle(show)
-    if show == _inv_last_vis then return end
-    _inv_last_vis = show
-    local fullShow = show and invcheck.fullInventory or false
-    for i = 1, 12 do
-        mainSlots[i].Visible = show
-        attachSlots[i].Visible = show
-    end
-    for i = 1, 54 do
-        fullSlots[i].Visible = fullShow
-        fullCounts[i].Visible = fullShow
-    end
+local function updateInvVisibility(show)
+    mainContainer.Visible = show
+    fullContainer.Visible = show and invcheck.fullInventory
 end
 
 local function getInvItemsList() return ItemsListFolder or ReplicatedStorage:FindFirstChild("ItemsList") end
@@ -1217,26 +1278,36 @@ local function populateInvData(target)
     invCache.lastFullInventory = invcheck.fullInventory
     local inventory = getInvContainer(target)
     if not inventory then return end
-    for i = 1, 12 do mainSlots[i].Image = EMPTY_ICON end
-    for i = 1, 12 do attachSlots[i].Image = EMPTY_ICON end
-    for i = 1, 54 do fullSlots[i].Image = EMPTY_ICON; fullCounts[i].Text = "" end
+    -- Clear main slots (item icons + attachment icons)
+    for i = 1, 12 do
+        mainSlots[i].Item.Image = EMPTY_ICON
+        if mainSlots[i].Attach then
+            for j = 1, 4 do mainSlots[i].Attach[j].Image = EMPTY_ICON end
+        end
+    end
+    -- Clear full inventory grid
+    for i = 1, 54 do
+        fullSlots[i].Image = EMPTY_ICON
+        fullCounts[i].Text = ""
+    end
+    -- Populate weapons (slots 1-3, with attachments)
+    -- Populate clothing/armor/helmet (slots 4-12)
     local weaponIdx = 1
     local clothingIdx = 4
-    local attachOffset = 0
     for _, item in pairs(inventory:GetChildren()) do
         local slot = item:GetAttribute("Slot")
         if slot and slot:find("Clothing") then
             local itemDef = itemsList:FindFirstChild(item.Name)
             local icon = itemDef and itemDef:FindFirstChild("ItemProperties") and itemDef.ItemProperties:FindFirstChild("ItemIcon")
             if icon and clothingIdx <= 12 then
-                mainSlots[clothingIdx].Image = icon.Image
+                mainSlots[clothingIdx].Item.Image = icon.Image
                 clothingIdx = clothingIdx + 1
             end
         elseif item:FindFirstChild("Attachments") then
             local itemDef = itemsList:FindFirstChild(item.Name)
             local icon = itemDef and itemDef:FindFirstChild("ItemProperties") and itemDef.ItemProperties:FindFirstChild("ItemIcon")
             if icon and weaponIdx <= 3 then
-                mainSlots[weaponIdx].Image = icon.Image
+                mainSlots[weaponIdx].Item.Image = icon.Image
                 for _, att in pairs(item.Attachments:GetChildren()) do
                     local attSlot = att:GetAttribute("Slot")
                     local attDef = itemsList:FindFirstChild(att.Name)
@@ -1247,14 +1318,14 @@ local function populateInvData(target)
                     elseif attSlot == "Extra" then idx = 4 end
                     if idx and attDef then
                         local aicon = attDef:FindFirstChild("ItemProperties") and attDef.ItemProperties:FindFirstChild("ItemIcon")
-                        if aicon then attachSlots[idx + attachOffset].Image = aicon.Image end
+                        if aicon then mainSlots[weaponIdx].Attach[idx].Image = aicon.Image end
                     end
                 end
                 weaponIdx = weaponIdx + 1
-                attachOffset = attachOffset + 4
             end
         end
     end
+    -- Populate full inventory grid (backpack contents)
     if invcheck.fullInventory then
         local idx = 1
         for _, container in pairs(inventory:GetChildren()) do
@@ -1353,9 +1424,9 @@ local _inv_acc = 0
 local _inv_was_visible = false
 cheat.utility.new_heartbeat(function(delta)
     if not invcheck.enabled then
-        if _inv_was_visible then VisibilityToggle(false); _inv_was_visible = false end
+        if _inv_was_visible then updateInvVisibility(false); _inv_was_visible = false end
         invCache.lastTargetInventory = nil
-        infoLabel.Visible = false
+        infoLabel.Text = ""
         return
     end
     _inv_acc = _inv_acc + delta
@@ -1363,13 +1434,13 @@ cheat.utility.new_heartbeat(function(delta)
     _inv_acc = 0
     local target = getInvTarget()
     if not target then
-        if _inv_was_visible then VisibilityToggle(false); _inv_was_visible = false end
+        if _inv_was_visible then updateInvVisibility(false); _inv_was_visible = false end
         invCache.lastTargetInventory = nil
-        infoLabel.Visible = false
+        infoLabel.Text = ""
         return
     end
     populateInvData(target)
-    VisibilityToggle(true)
+    updateInvVisibility(true)
     _inv_was_visible = true
     if invcheck.showTarget then
         local labelText = target.Name
@@ -1377,9 +1448,8 @@ cheat.utility.new_heartbeat(function(delta)
         if invcheck.showValue then labelText = labelText .. " | $" .. getInvValue(target) end
         infoLabel.Text = labelText
         infoLabel.TextColor3 = invcheck.targetColor
-        infoLabel.Visible = true
     else
-        infoLabel.Visible = false
+        infoLabel.Text = ""
     end
 end)
 
@@ -1535,6 +1605,9 @@ cheat.EspLibrary = {} do
                 chams_intensity = 0.5, chams_saturation = 1.0,
                 high_kd_marker = false,
                 high_kd_outline_color = Color3.fromRGB(255, 0, 0),
+                -- Skeleton ESP (ported from pin.reta)
+                skeleton = false,
+                skeleton_color = { Color3.new(1,1,1), 0 },
             },
             corpse = {
                 enabled = false, name = true, distance = false,
@@ -1698,6 +1771,26 @@ cheat.EspLibrary = {} do
         end
     end)
 
+    -- Skeleton bone order (ported from pin.reta)
+    -- Maps each bone name -> its parent bone name. Drives Line drawing per-bone.
+    local skeleton_order = {
+        ["LeftFoot"] = "LeftLowerLeg",
+        ["LeftLowerLeg"] = "LeftUpperLeg",
+        ["LeftUpperLeg"] = "LowerTorso",
+        ["RightFoot"] = "RightLowerLeg",
+        ["RightLowerLeg"] = "RightUpperLeg",
+        ["RightUpperLeg"] = "LowerTorso",
+        ["LeftHand"] = "LeftLowerArm",
+        ["LeftLowerArm"] = "LeftUpperArm",
+        ["LeftUpperArm"] = "UpperTorso",
+        ["RightHand"] = "RightLowerArm",
+        ["RightLowerArm"] = "RightUpperArm",
+        ["RightUpperArm"] = "UpperTorso",
+        ["LowerTorso"] = "UpperTorso",
+        ["UpperTorso"] = "Head"
+    }
+    esp_table.skeleton_order = skeleton_order
+
     local function create_esp(player, isnpc)
         if not player then return end
         if player.ClassName == "Model" then isnpc = true end
@@ -1728,6 +1821,11 @@ cheat.EspLibrary = {} do
             loaded_plrs[player].obj["health_bar_glow_cap_bottom_"..i]= create_obj("Circle", { Visible=false, Filled=true, ZIndex=1 })
         end
 
+        -- Skeleton bone Line drawings (ported from pin.reta)
+        for bone_name, _ in pairs(skeleton_order) do
+            loaded_plrs[player].obj["skeleton_"..bone_name] = create_obj("Line", { Visible=false, Thickness=1, ZIndex=2 })
+        end
+
         local plr = loaded_plrs[player]
         local obj = plr.obj
         local box, box_outline, box_fill = obj.box, obj.box_outline, obj.box_fill
@@ -1744,17 +1842,15 @@ cheat.EspLibrary = {} do
             cham.FillTransparency  = isWireframe and 1 or settings.chams_fill_color[2]
             cham.OutlineColor      = settings.chamsoutline_color[1]
             cham.OutlineTransparency = settings.chams_outline and settings.chamsoutline_color[2] or 1
+            -- FIX: only update COLORS / thickness here, NOT .Visible — the per-frame
+            -- render loop toggles visibility based on whether the player is on screen.
+            -- Setting .Visible = settings.box here causes stale boxes/names to linger
+            -- for off-screen players after a toggle (setvis_cache prevents re-hide).
             box.Color, box.Transparency = settings.box_color[1], settings.box_color[2]
             box.Thickness = 1
             box_outline.Color, box_outline.Transparency = settings.box_outline_color[1], settings.box_outline_color[2]
             box_outline.Thickness = 3
-            box.Visible        = settings.box
-            box_outline.Visible = settings.box_outline
             box_fill.Color, box_fill.Transparency = settings.box_fill_color[1], settings.box_fill_color[2]
-            box_fill.Visible   = settings.box_fill
-            realname.Visible   = settings.realname
-            dist.Visible       = settings.dist
-            weapon.Visible     = settings.weapon
             realname.Size, realname.Font = main_settings.textSize, main_settings.textFont
             realname.Color = settings.realname_color[1]
             realname.Outline, realname.OutlineColor = settings.dist_outline, settings.dist_outline_color
@@ -1767,6 +1863,18 @@ cheat.EspLibrary = {} do
             for i=1,10 do
                 if obj["health_bar_"..i] then obj["health_bar_"..i].Thickness = settings.health_thickness end
             end
+            -- Skeleton color update (NOT visibility — render loop toggles that per-frame)
+            for bone_name, _ in pairs(skeleton_order) do
+                local skel_line = obj["skeleton_"..bone_name]
+                if skel_line then
+                    skel_line.Color = settings.skeleton_color[1]
+                    skel_line.Transparency = settings.skeleton_color[2]
+                    skel_line.Thickness = 1
+                end
+            end
+            -- Reset the visibility cache so the next render frame re-applies
+            -- the correct .Visible state based on settings + on-screen check.
+            setvis_cache = nil
         end
 
         function plr:togglevis(bool)
@@ -1791,6 +1899,11 @@ cheat.EspLibrary = {} do
                 obj["health_bar_glow_cap_bottom_"..i].Visible = settings.health
             end
             for i=1,10 do obj["health_bar_"..i].Visible = settings.health end
+            -- Skeleton visibility
+            for bone_name, _ in pairs(skeleton_order) do
+                local skel_line = obj["skeleton_"..bone_name]
+                if skel_line then skel_line.Visible = settings.skeleton end
+            end
             dist.Visible   = settings.dist
             weapon.Visible = settings.weapon
         end
@@ -2036,6 +2149,55 @@ cheat.EspLibrary = {} do
                 end
                 cham.OutlineColor        = settings.chamsoutline_color[1]
                 cham.OutlineTransparency = settings.chams_outline and math.clamp(settings.chamsoutline_color[2]+int_off, 0, 0.99) or 1
+            end
+
+            -- SKELETON ESP render (ported from pin.reta)
+            if settings.skeleton then
+                -- Cache bone→parent→Line mapping on character change.
+                -- FIX: plr.last_character may be nil and _skel_char_cached_for may be nil,
+                -- which makes the ~= check return false (both nil). Compare to a sentinel
+                -- instead, and always (re)build when character changes OR cache is empty.
+                if plr.last_character ~= plr._skel_char_cached_for or not plr._skel_parts then
+                    plr._skel_char_cached_for = plr.last_character
+                    plr._skel_parts = {}
+                    if character then
+                        for _, part in ipairs(character:GetChildren()) do
+                            local parent_name = skeleton_order[part.Name]
+                            if parent_name then
+                                local parent_instance = character:FindFirstChild(parent_name)
+                                local line = obj["skeleton_"..part.Name]
+                                if parent_instance and line then
+                                    plr._skel_parts[#plr._skel_parts + 1] = { part = part, parent = parent_instance, line = line }
+                                end
+                            end
+                        end
+                    end
+                end
+                if plr._skel_parts then
+                    for i = 1, #plr._skel_parts do
+                        local entry = plr._skel_parts[i]
+                        if entry.part.Parent and entry.parent.Parent then
+                            local p1 = camera:WorldToViewportPoint(entry.part.Position)
+                            local p2 = camera:WorldToViewportPoint(entry.parent.Position)
+                            if p1.Z > 0 and p2.Z > 0 then
+                                entry.line.From = Vector2.new(p1.X, p1.Y)
+                                entry.line.To   = Vector2.new(p2.X, p2.Y)
+                                entry.line.Visible = true
+                            else
+                                entry.line.Visible = false
+                            end
+                        else
+                            entry.line.Visible = false
+                        end
+                    end
+                end
+            else
+                -- Hide all skeleton lines when disabled
+                if plr._skel_parts then
+                    for i = 1, #plr._skel_parts do
+                        plr._skel_parts[i].line.Visible = false
+                    end
+                end
             end
         end)
         plr:forceupdate()
@@ -2734,6 +2896,11 @@ ESPL:AddToggle("esp_weapon", { Text = "Weapon ESP", Default = false, Callback = 
     :AddColorPicker("esp_wpcol", { Title = "Weapon Color", Default = Color3.new(1,1,1), Callback = colorCb(es.weapon_color) })
 ESPL:AddToggle("esp_outline", { Text = "Text Outline", Default = false, Callback = function(v) es.dist_outline = v; cheat.EspLibrary.icaca() end })
     :AddColorPicker("esp_outlinecol", { Title = "Outline Color", Default = Color3.new(0,0,0), Callback = function(v) es.dist_outline_color = v; cheat.EspLibrary.icaca() end })
+
+-- Skeleton ESP (ported from pin.reta)
+ESPL:AddToggle("esp_skeleton", { Text = "Skeleton ESP", Default = false, Callback = function(v) es.skeleton = v; cheat.EspLibrary.icaca() end })
+    :AddColorPicker("esp_skelcol", { Title = "Skeleton Color", Default = Color3.new(1,1,1), Callback = colorCb(es.skeleton_color) })
+ESPL:AddSlider("esp_skeltrans", { Text = "Skeleton Transparency", Default = 0, Min = 0, Max = 1, Rounding = 1, Callback = function(v) es.skeleton_color[2] = v; cheat.EspLibrary.icaca() end })
 
 ESPL:AddToggle("esp_chams", { Text = "Chams", Default = false, Callback = function(v) es.chams = v; cheat.EspLibrary.icaca() end })
     :AddColorPicker("esp_chamscol", { Title = "Chams Fill", Default = Color3.fromRGB(255,255,255), Callback = colorCb(es.chams_fill_color) })
@@ -5605,56 +5772,65 @@ task.spawn(function()
 end)
 
 -- updateClient hook (recoil, spread, bob, instant aim, unlock firemodes, rapid fire)
+-- Ported from pin.reta: continuous background scanner re-hooks new spring tables after respawn
+cheat.alive = true
 task.spawn(function()
     local got_that = false
     -- Pin.reta-style spring table hooks (точечнее чем updateClient): recoilPos/recoilRot/cameraRecoil/walkCycle/gunSway/sway/strafeTilt/jumpTilt/jumpCameraTilt
     local recoil_spring_names = {recoilPos = true, recoilRot = true, cameraRecoil = true}
     local bob_spring_names = {walkCycle = true, sprintCycle = true, gunSway = true, sway = true, strafeTilt = true, jumpTilt = true, jumpCameraTilt = true}
+    local function hook_spring_table(gc)
+        if rawget(gc, "springs") and rawget(gc, "characterAnimations") and not gc._zh_springs_hooked then
+            gc._zh_springs_hooked = true
+            local springs = gc.springs
+            for s_name, spring in pairs(springs) do
+                if type(spring) == "table" and rawget(spring, "shove") and rawget(spring, "update") and not spring._zh_hooked then
+                    spring._zh_hooked = true
+                    local old_shove = spring.shove
+                    local old_update = spring.update
+                    spring.shove = function(self, force, ...)
+                        if norecoil and recoil_spring_names[s_name] then
+                            local r_mult = (recoil_percent or 0) / 100
+                            if r_mult <= 0 then return end
+                            if typeof(force) == "Vector3" then force = force * r_mult end
+                            if typeof(force) == "number" then force = force * r_mult end
+                        end
+                        if nobob and bob_spring_names[s_name] then
+                            return
+                        end
+                        return old_shove(self, force, ...)
+                    end
+                    spring.update = function(self, ...)
+                        if norecoil and recoil_spring_names[s_name] then
+                            local r_mult = (recoil_percent or 0) / 100
+                            if r_mult <= 0 then
+                                self.p = Vector3.zero
+                                self.v = Vector3.zero
+                                self.target = Vector3.zero
+                                return Vector3.zero
+                            end
+                        end
+                        if nobob and bob_spring_names[s_name] then
+                            self.p = Vector3.zero
+                            self.v = Vector3.zero
+                            self.target = Vector3.zero
+                            return Vector3.zero
+                        end
+                        return old_update(self, ...)
+                    end
+                end
+            end
+            return true
+        end
+        return false
+    end
     repeat
         local gc_list = getgc(true)
         for i = 1, #gc_list do
             local gc = gc_list[i]
             if type(gc) == "table" then
-                if rawget(gc, "springs") and rawget(gc, "characterAnimations") and not gc._zh_springs_hooked then
-                    gc._zh_springs_hooked = true
-                    local springs = gc.springs
-                    for s_name, spring in pairs(springs) do
-                        if type(spring) == "table" and rawget(spring, "shove") and rawget(spring, "update") and not spring._zh_hooked then
-                            spring._zh_hooked = true
-                            local old_shove = spring.shove
-                            local old_update = spring.update
-                            spring.shove = function(self, force, ...)
-                                if norecoil and recoil_spring_names[s_name] then
-                                    local r_mult = (recoil_percent or 0) / 100
-                                    if r_mult <= 0 then return end
-                                    if typeof(force) == "Vector3" then force = force * r_mult end
-                                    if typeof(force) == "number" then force = force * r_mult end
-                                end
-                                if nobob and bob_spring_names[s_name] then
-                                    return
-                                end
-                                return old_shove(self, force, ...)
-                            end
-                            spring.update = function(self, ...)
-                                if norecoil and recoil_spring_names[s_name] then
-                                    local r_mult = (recoil_percent or 0) / 100
-                                    if r_mult <= 0 then
-                                        self.p = Vector3.zero
-                                        self.v = Vector3.zero
-                                        self.target = Vector3.zero
-                                        return Vector3.zero
-                                    end
-                                end
-                                if nobob and bob_spring_names[s_name] then
-                                    self.p = Vector3.zero
-                                    self.v = Vector3.zero
-                                    self.target = Vector3.zero
-                                    return Vector3.zero
-                                end
-                                return old_update(self, ...)
-                            end
-                        end
-                    end
+                if hook_spring_table(gc) then
+                    got_that = true
                 end
                 if type(rawget(gc,"shove")) == "function" and type(rawget(gc,"update")) == "function" and not gc._zh_oldspring_hooked then
                     gc._zh_oldspring_hooked = true
@@ -5731,6 +5907,29 @@ task.spawn(function()
         end
         if not got_that then task.wait(1) end
     until got_that
+
+    -- Continuous background scanner (ported from pin.reta): re-hooks new spring tables
+    -- after respawn. Runs at 5s interval ONLY while norecoil OR nobob is active.
+    task.spawn(function()
+        local next_scan = 0
+        while cheat.alive do
+            task.wait(1)
+            if not (norecoil or nobob) then continue end
+            local now = os.clock()
+            if now < next_scan then continue end
+            next_scan = now + 5
+            pcall(function()
+                local gc_list = getgc(true)
+                for i = 1, #gc_list do
+                    local gc = gc_list[i]
+                    if type(gc) == "table" then
+                        hook_spring_table(gc)
+                    end
+                    if i % 500 == 0 then task.wait() end
+                end
+            end)
+        end
+    end)
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -6076,24 +6275,44 @@ __namecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     end
 
     -- RAYCAST: подмена результата на hit в target_part (silent aim)
+    -- Ported from pin.reta: only intercept raycasts from the Bullet module.
+    -- This prevents breaking ESP vis-checks and other game raycasts.
     if method == "Raycast" then
         local origin = args[1]
-        if typeof(origin) == "Vector3" and silent_aim.enabled and silent_aim.target_part then
+        -- Check if this raycast comes from the Bullet module (swim-style stack check)
+        local from_bullet = false
+        if debug and debug.traceback then
+            pcall(function()
+                from_bullet = debug.traceback():find("Bullet") ~= nil
+            end)
+        end
+        if typeof(origin) == "Vector3" and silent_aim.enabled and silent_aim.target_part and from_bullet then
             local hitpart = silent_aim.target_part
             if hitpart and hitpart.Parent then
+                -- corner_shoot/manipulation: shift origin
                 if silent_aim.corner_shoot and silent_aim.manipulated_origin then
                     origin = silent_aim.manipulated_origin
                     args[1] = origin
                 end
-                local direction = hitpart.Position - origin
-                args[2] = direction
-                return {
-                    Instance = hitpart,
-                    Position = hitpart.Position,
-                    Normal   = direction.Unit * -1,
-                    Material = hitpart.Material,
-                    Distance = direction.Magnitude
-                }
+                -- pin.reta logic: force-collision gated by wallbang OR isvisible OR manipulated
+                local can_force_collision = silent_aim.testwallbang
+                    or silent_aim.isvisible
+                    or silent_aim.manipulated_origin ~= nil
+                if can_force_collision then
+                    local direction = hitpart.Position - origin
+                    return {
+                        Instance = hitpart,
+                        Position = hitpart.Position,
+                        Normal   = direction.Unit * -1,
+                        Material = hitpart.Material,
+                        Distance = direction.Magnitude
+                    }
+                end
+                -- wallbang OFF + target not visible: redirect bullet ray direction toward target,
+                -- let the raycast run normally (walls will block the shot)
+                args[2] = hitpart.Position - origin
+                setnamecallmethod(method)
+                return __namecall(self, unpack(args, 1, argc))
             end
         end
     end
@@ -8161,6 +8380,559 @@ cheat.staff_detected = cheat.staff_detected or {}
     end
 end)()
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- [BLOCK 15e] MISC TAB — Autosort + Clean Inventory BG (ported from pin.reta)
+-- ═══════════════════════════════════════════════════════════════════════════
+;(function()
+    local MiscExtrasGroup = Tabs.Misc:AddLeftGroupbox("Inventory Extras")
+
+    -- ── AUTOSORT button (ported from pin.reta) ─────────────────────────────
+    MiscExtrasGroup:AddButton("autosort", {
+        Text = "Autosort Vault",
+        Tooltip = "Sorts your vault: Keys → Weapons → Attachments → Ammo → Mags → Armor → Clothing → Backpacks → Fabrics → Utility → Meds → Treasure → Trash → Rubles",
+        Callback = function()
+            local InventoryMove = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("InventoryMove")
+            local rsPlayer = ReplicatedStorage:FindFirstChild("Players") and ReplicatedStorage.Players:FindFirstChild(LocalPlayer.Name)
+
+            if not rsPlayer or not rsPlayer:FindFirstChild("VaultStorage") then
+                Library:Notify({ Title = "Autosort", Description = "Could not find VaultStorage!", Time = 3 })
+                return
+            end
+
+            local vaultInv = rsPlayer.VaultStorage.Inventory
+
+            local ammoTypes = {}
+            if ReplicatedStorage:FindFirstChild("AmmoTypes") then
+                for _, a in ipairs(ReplicatedStorage.AmmoTypes:GetChildren()) do
+                    ammoTypes[a.Name] = true
+                end
+            end
+
+            local weaponTiers = {
+                ["TFZ98S"] = 1, ["R700"] = 2, ["AsVal"] = 3, ["M4"] = 4, ["FAL"] = 5,
+                ["SVD"] = 6, ["PKM"] = 7, ["AKMN"] = 8, ["AKM"] = 9, ["Saiga12"] = 10,
+                ["ADAR15"] = 11, ["MP5SD"] = 12, ["PPSH41"] = 13, ["SKS"] = 14, ["Mosin"] = 15,
+                ["IZh81"] = 16, ["IZh12"] = 17, ["MP443"] = 18, ["TT33"] = 19, ["Makarov"] = 20,
+                ["GoldenMakarov"] = 21, ["TOZ106"] = 22, ["VZ61"] = 23, ["MK23"] = 24, ["RPG7"] = 25,
+                ["TFZ0"] = 26
+            }
+            local medNames = {
+                ["AI2"] = true, ["AI4"] = true, ["AA2"] = true, ["IFAK"] = true,
+                ["Bandage"] = true, ["Defib"] = true, ["SerumYellow"] = true,
+                ["SerumGreen"] = true, ["Immunster"] = true, ["ImmunsterReactor"] = true,
+                ["ImmunsterWinter"] = true, ["Beans"] = true, ["BloxyCola"] = true,
+                ["CatfrogSoda"] = true, ["ChocolateBar"] = true, ["CondensedMilk"] = true,
+                ["KevCola"] = true, ["MaxEnergy"] = true
+            }
+            local keyTypes = { Key = true, Keycard = true }
+            local attachmentTypes = { Sight = true, Muzzle = true, Handle = true, Stock = true, Front = true, Extra = true }
+            local fabricNames = { LinenFabric = true, RipstopFabric = true, AramidFabric = true, CottonFabric = true, Rags = true }
+            local treasureNames = { Gold50g = true, GoldWatch = true, GoldenTicket = true, SolterStatue = true, Smartphone = true, AntonPlush = true, DozerPlush = true, WhisperPlush = true, GPU = true, CPU = true, RAM = true, SSD = true, PortableConsole = true }
+            local utilityTypes = { Equipment = true, FlareGun = true, Filter = true, Buildable = true, Grenade = true, RepairKit = true }
+            local armorNames = { HSPV = true, ["6B2"] = true, ["6B23"] = true, ["6B27"] = true, ["6B43"] = true, ["6B5"] = true, JPC = true, Kulon = true, LegArmor = true, SSH68 = true, ScavKingVest = true, Smersh = true, TORS = true, UNOHelmet = true, UNOVest = true, ZSh = true, MotorcycleHelmet = true, IOTV4 = true, Altyn = true, ConcealedVest = true, FastMT = true, Bandoiler = true, DozerArmor = true, TitanShield = true, KneePads = true, HandWraps = true, CombatGloves = true }
+            local backpackNames = { Lynx = true, Tortilla = true, SpecopsBackpack = true, WastelandBackpack = true, Attak5 = true }
+
+            local function getItemCategory(item)
+                local name = item.Name
+                local propObj = item:FindFirstChild("ItemProperties")
+                local refItem = ReplicatedStorage:FindFirstChild("ItemsList") and ReplicatedStorage.ItemsList:FindFirstChild(name)
+                local refProps = refItem and refItem:FindFirstChild("ItemProperties")
+
+                local itemType = (refProps and refProps:GetAttribute("ItemType")) or (propObj and propObj:GetAttribute("ItemType")) or ""
+                local propName = (propObj and propObj:IsA("ObjectValue") and propObj.Value) and propObj.Value.Name or name
+
+                if keyTypes[itemType] or propName:find("Card") or propName:find("Key") or propName == "BlueCard" or propName == "OrangeCard" or propName == "RedCard" then
+                    return 10, 1
+                end
+                if itemType == "RangedWeapon" or itemType == "MeleeWeapon" or weaponTiers[propName] then
+                    return 20, weaponTiers[propName] or 99
+                end
+                if attachmentTypes[itemType] or propName:find("Scope") or propName:find("Sight") or propName:find("Muzzle") or propName:find("Suppressor") or propName:find("Handle") or propName:find("Stock") or propName:find("Grip") or propName:find("Front") or propName:find("Rail") then
+                    return 30, 1
+                end
+                if itemType == "Ammo" or ammoTypes[propName] or propName:find("%d+x%d+") or propName:find("12ga") or propName:find("338") or propName:find("45AP") then
+                    return 40, 1
+                end
+                if itemType == "Magazine" or propName:find("Mag") or propName:find("Drum") then
+                    return 50, 1
+                end
+                if itemType == "Visor" or itemType == "HelmetMask" or armorNames[propName] or propName:find("Helmet") or propName:find("Visor") or propName:find("Mask") or propName:find("Vest") or propName:find("Rig") or propName:find("Armor") or propName:find("Glove") then
+                    return 60, 1
+                end
+                if (itemType == "Clothing" and not armorNames[propName] and not backpackNames[propName]) or propName:find("Shirt") or propName:find("Pants") or propName:find("Gorka") or propName:find("Ghillie") or propName:find("Civilian") or propName:find("Wasteland") then
+                    return 70, 1
+                end
+                if backpackNames[propName] or propName:find("Backpack") or propName:find("Bag") or propName == "Lynx" or propName == "Tortilla" then
+                    return 80, 1
+                end
+                if fabricNames[propName] or propName:find("Fabric") or propName:find("Cloth") or propName:find("Kevlar") or propName:find("Thread") or propName:find("Tape") or propName:find("Sewing") then
+                    return 90, 1
+                end
+                if utilityTypes[itemType] or propName:find("Flare") or propName:find("Compass") or propName:find("Radio") or propName:find("Map") or propName:find("Pathfinder") or propName:find("Lighter") or propName:find("Tool") or propName:find("Match") or propName:find("Battery") or propName:find("Filter") then
+                    return 100, 1
+                end
+                if itemType == "Medical" or itemType == "Food" or medNames[propName] or propName:find("AI%d") or propName:find("Serum") or propName:find("Med") or propName:find("Food") or propName:find("Drink") or propName:find("Cola") then
+                    return 110, 1
+                end
+                if itemType == "Present" or treasureNames[propName] or propName:find("Gold") or propName:find("Statue") or propName:find("Phone") or propName:find("Plush") or propName:find("Gift") then
+                    return 120, 1
+                end
+                if itemType == "Material" or propName == "Rubles" or propName:find("Cash") or propName:find("Money") then
+                    return 140, 1
+                end
+                return 130, 1
+            end
+
+            local itemList = {}
+            for _, item in ipairs(vaultInv:GetChildren()) do
+                local slotStr = item:GetAttribute("Slot") or "Container999"
+                local slotNum = tonumber(slotStr:gsub("%D", "")) or 999
+                local catScore, subScore = getItemCategory(item)
+                local skin = item:GetAttribute("Skin") or (item:FindFirstChild("Skin") and item.Skin.Value) or "Default"
+                table.insert(itemList, {
+                    item = item,
+                    name = item.Name,
+                    skin = skin,
+                    catScore = catScore,
+                    subScore = subScore,
+                    initialSlot = slotNum
+                })
+            end
+
+            table.sort(itemList, function(a, b)
+                if a.catScore ~= b.catScore then return a.catScore < b.catScore end
+                if a.subScore ~= b.subScore then return a.subScore < b.subScore end
+                if a.name ~= b.name then return a.name < b.name end
+                if a.skin ~= b.skin then return a.skin < b.skin end
+                return a.initialSlot < b.initialSlot
+            end)
+
+            Library:Notify({ Title = "Autosort", Description = "Sorting vault ("..#itemList.." items)...", Time = 3 })
+
+            task.spawn(function()
+                local DELAY = 0.05
+                for targetIndex, targetData in ipairs(itemList) do
+                    local targetSlotName = "Container" .. targetIndex
+                    local currentSlotOfTargetItem = targetData.item:GetAttribute("Slot")
+                    if currentSlotOfTargetItem ~= targetSlotName then
+                        if InventoryMove then
+                            InventoryMove:FireServer(currentSlotOfTargetItem, targetSlotName, vaultInv, vaultInv, nil)
+                        end
+                        task.wait(DELAY)
+                    end
+                end
+                Library:Notify({ Title = "Autosort", Description = "Vault sorted!", Time = 3 })
+            end)
+        end
+    })
+
+    -- ── CLEAN INVENTORY BG (ported from pin.reta) ──────────────────────────
+    local clean_inv_bg = false
+    local clean_inv_toggle = MiscExtrasGroup:AddToggle("clean_inv_bg", {
+        Text = "Clean Inventory BG",
+        Tooltip = "Removes grey/stripes/blur from inventory windows (CharacterFrame, InventoryFrame, Loot, TradeInfo, Trading, CraftingInfo, InspectionBox, ItemModdingBox, Decor)",
+        Default = false,
+        Callback = function(v)
+            clean_inv_bg = v
+            local invBlur = Lighting:FindFirstChild("InventoryBlur")
+            if invBlur then
+                invBlur.Enabled = not v
+            end
+            if v then
+                local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+                local mainGui = pgui and pgui:FindFirstChild("MainGui")
+                if mainGui then
+                    for _, desc in ipairs(mainGui:GetDescendants()) do
+                        if desc:IsA("GuiObject") then
+                            if desc.Name == "Decor" and desc:IsA("ImageLabel") then
+                                desc.Visible = false
+                            elseif desc.Name == "CharacterFrame" or desc.Name == "InventoryFrame" or desc.Name == "Loot" or desc.Name == "TradeInfo" or desc.Name == "Trading" or desc.Name == "CraftingInfo" or desc.Name == "InspectionBox" or desc.Name == "ItemModdingBox" then
+                                desc.BackgroundTransparency = 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    })
+
+    -- One-time event listener for newly created UI elements (0 lag)
+    local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+    if pgui then
+        local conn
+        conn = pgui.DescendantAdded:Connect(function(desc)
+            if clean_inv_bg and desc:IsA("GuiObject") then
+                if desc.Name == "Decor" and desc:IsA("ImageLabel") then
+                    desc.Visible = false
+                elseif desc.Name == "CharacterFrame" or desc.Name == "InventoryFrame" or desc.Name == "Loot" or desc.Name == "TradeInfo" or desc.Name == "Trading" or desc.Name == "CraftingInfo" or desc.Name == "InspectionBox" or desc.Name == "ItemModdingBox" then
+                    desc.BackgroundTransparency = 1
+                end
+            end
+        end)
+        if cheat.raw_conns then table.insert(cheat.raw_conns, conn) end
+    end
+
+    -- Hook InventoryBlur creation
+    local blur_conn
+    blur_conn = Lighting.ChildAdded:Connect(function(child)
+        if clean_inv_bg and (child:IsA("BlurEffect") or child.Name:lower():find("blur")) then
+            child.Enabled = false
+        end
+    end)
+    if cheat.raw_conns then table.insert(cheat.raw_conns, blur_conn) end
+end)()
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- [BLOCK 15f] MISC TAB — Grenade Trajectory Predictor (ported from pin.reta)
+-- ═══════════════════════════════════════════════════════════════════════════
+;(function()
+    local GrenadeGroup = Tabs.Misc:AddLeftGroupbox("Grenade Trajectory")
+
+    cheat.grenade_predict_enabled = false
+    cheat.grenade_predict_color = Color3.fromRGB(255, 80, 80)
+    cheat.grenade_predict_impact_color = Color3.fromRGB(255, 200, 50)
+    cheat.grenade_predict_bounce_count = 3
+
+    GrenadeGroup:AddToggle("grenade_predict", {
+        Text = "Predict Grenade Trajectory",
+        Tooltip = "Renders real-time 3D neon trajectory beam, bounces, and 3D blast range ring when holding a grenade",
+        Default = false,
+        Callback = function(v) cheat.grenade_predict_enabled = v end
+    }):AddColorPicker("grenade_predict_color", {
+        Default = Color3.fromRGB(255, 80, 80),
+        Title = "3D Beam Color",
+        Transparency = 0,
+        Callback = function(v) cheat.grenade_predict_color = v end
+    }):AddColorPicker("grenade_predict_impact_color", {
+        Default = Color3.fromRGB(255, 200, 50),
+        Title = "Impact Ring Color",
+        Transparency = 0,
+        Callback = function(v) cheat.grenade_predict_impact_color = v end
+    })
+    GrenadeGroup:AddSlider("grenade_predict_bounces", {
+        Text = "Grenade Bounces",
+        Default = 3, Min = 1, Max = 10, Rounding = 0, Compact = true,
+        Callback = function(v) cheat.grenade_predict_bounce_count = v end
+    })
+
+    -- Trajectory folder in workspace (for raycast ignore + 3D parts)
+    local traj_folder = Instance.new("Folder")
+    traj_folder.Name = "ZalupaTrajectoryFolder"
+    traj_folder.Parent = workspace
+
+    local MAX_GRENADE_PARTS = 80
+    local grenade_3d_parts = {}
+    for i = 1, MAX_GRENADE_PARTS do
+        local p = Instance.new("Part")
+        p.Anchored = true
+        p.CanCollide = false
+        p.CanQuery = false
+        p.CanTouch = false
+        p.Size = Vector3.new(0.12, 0.12, 1)
+        p.Material = Enum.Material.Neon
+        p.Color = Color3.fromRGB(255, 80, 80)
+        p.Transparency = 1
+        p.Parent = traj_folder
+        grenade_3d_parts[i] = p
+    end
+
+    -- Impact ball adornment (sphere visible through walls)
+    local impact_anchor = Instance.new("Part")
+    impact_anchor.Anchored = true
+    impact_anchor.CanCollide = false
+    impact_anchor.CanQuery = false
+    impact_anchor.CanTouch = false
+    impact_anchor.Size = Vector3.new(0.05, 0.05, 0.05)
+    impact_anchor.Transparency = 1
+    impact_anchor.Parent = traj_folder
+
+    local impact_ball_adornment = Instance.new("SphereHandleAdornment")
+    impact_ball_adornment.Adornee = impact_anchor
+    impact_ball_adornment.Radius = 1.5
+    impact_ball_adornment.Color3 = Color3.fromRGB(255, 200, 50)
+    impact_ball_adornment.AlwaysOnTop = true
+    impact_ball_adornment.ZIndex = 5
+    impact_ball_adornment.Transparency = 0.1
+    impact_ball_adornment.Visible = false
+    impact_ball_adornment.Parent = traj_folder
+
+    -- Blast range disk (flat Part — RingGyroAdornment not available in this executor)
+    local ring_anchor = Instance.new("Part")
+    ring_anchor.Anchored = true
+    ring_anchor.CanCollide = false
+    ring_anchor.CanQuery = false
+    ring_anchor.CanTouch = false
+    ring_anchor.Size = Vector3.new(0.05, 0.05, 0.05)
+    ring_anchor.Transparency = 1
+    ring_anchor.Parent = traj_folder
+
+    local blast_ring_adornment = Instance.new("Part")
+    blast_ring_adornment.Anchored = true
+    blast_ring_adornment.CanCollide = false
+    blast_ring_adornment.CanQuery = false
+    blast_ring_adornment.CanTouch = false
+    blast_ring_adornment.Material = Enum.Material.Neon
+    blast_ring_adornment.Color = Color3.fromRGB(255, 200, 50)
+    blast_ring_adornment.Transparency = 0.4
+    blast_ring_adornment.Size = Vector3.new(17, 0.05, 17)
+    blast_ring_adornment.Shape = Enum.PartType.Cylinder
+    blast_ring_adornment.Transparency = 1
+    blast_ring_adornment.Parent = traj_folder
+
+    local grenade_ray_params = RaycastParams.new()
+    grenade_ray_params.FilterType = Enum.RaycastFilterType.Exclude
+    grenade_ray_params.IgnoreWater = false
+    pcall(function()
+        grenade_ray_params.CollisionGroup = "WeaponRay"
+    end)
+
+    local GRENADE_PROFILES = {
+        ["F1"] = { name="F1", overhand_speed=92, underhand_speed=40, fuse_time=3.0, is_impact=false, radius=8.5, bounciness=0.30 },
+        ["RGD5"] = { name="RGD-5", overhand_speed=108, underhand_speed=46, fuse_time=3.0, is_impact=false, radius=8.5, bounciness=0.38 },
+        ["RGO"] = { name="RGO", overhand_speed=98, underhand_speed=42, fuse_time=3.2, is_impact=true, radius=17.0, bounciness=0.25 },
+        ["M84"] = { name="M84 Flashbang", overhand_speed=116, underhand_speed=50, fuse_time=1.2, is_impact=false, radius=4.5, bounciness=0.45 },
+        ["Snowball"] = { name="Snowball", overhand_speed=122, underhand_speed=54, fuse_time=2.5, is_impact=true, radius=3.0, bounciness=0.05 }
+    }
+
+    local function get_held_grenade_info()
+        local rs_plrs = ReplicatedStorage:FindFirstChild("Players")
+        local rs_plr = rs_plrs and rs_plrs:FindFirstChild(LocalPlayer.Name)
+        local gv = rs_plr and rs_plr:FindFirstChild("Status") and rs_plr.Status:FindFirstChild("GameplayVariables")
+        local eq_tool = gv and gv:FindFirstChild("EquippedTool") and gv.EquippedTool.Value
+        if not eq_tool then return nil end
+
+        local item_props = eq_tool:IsA("ObjectValue") and eq_tool.Value and (eq_tool.Value:FindFirstChild("ItemProperties") or eq_tool.Value) or (eq_tool:FindFirstChild("ItemProperties") or eq_tool)
+        local item_type = item_props and (item_props:GetAttribute("ItemType") or item_props:GetAttribute("SlotType"))
+        local tool_name = eq_tool.Name
+
+        if GRENADE_PROFILES[tool_name] then
+            local p = GRENADE_PROFILES[tool_name]
+            return {
+                name = p.name or tool_name,
+                fuse = p.fuse_time,
+                is_rgo = p.is_impact,
+                radius = p.radius,
+                overhand_speed = p.overhand_speed,
+                underhand_speed = p.underhand_speed,
+                bounciness = p.bounciness
+            }
+        elseif item_type == "Grenade" or string.find(string.lower(tool_name), "grenade") or string.find(string.lower(tool_name), "f1") or string.find(string.lower(tool_name), "rgd") or string.find(string.lower(tool_name), "rgo") or string.find(string.lower(tool_name), "m84") then
+            local desc = item_props and item_props:GetAttribute("Description") or ""
+            local fuse_parsed = 3.0
+            local match_fuse = string.match(desc, "Fuze length is set to%s*(%d+%.?%d*)%s*sec")
+            if match_fuse then fuse_parsed = tonumber(match_fuse) or 3.0 end
+            local is_impact = string.find(string.lower(desc), "impact") ~= nil
+            local rad = 8.5
+            local match_rad = string.match(desc, "fatality radius of around%s*(%d+%.?%d*)%s*metre")
+            if match_rad then rad = (tonumber(match_rad) or 3) * 2.83 end
+            return {
+                name = item_props and item_props:GetAttribute("ItemName") or tool_name,
+                fuse = fuse_parsed,
+                is_rgo = is_impact,
+                radius = rad,
+                overhand_speed = 100,
+                underhand_speed = 44,
+                bounciness = 0.35
+            }
+        end
+        return nil
+    end
+
+    local function simulate_trajectory_path(start_pos, start_vel, max_time_limit, max_bounce_limit, bounciness_val, is_impact_val)
+        local dt = 0.035
+        local elapsed = 0
+        local c_pos = start_pos
+        local c_vel = start_vel
+        local c_bounces = 0
+        local gravity = Vector3.new(0, -(workspace.Gravity or 80), 0)
+        local pts = { c_pos }
+        local last_norm = Vector3.new(0, 1, 0)
+
+        while elapsed < max_time_limit and c_bounces <= max_bounce_limit and #pts < MAX_GRENADE_PARTS do
+            local next_pos = c_pos + (c_vel * dt) + (0.5 * gravity * dt * dt)
+            local next_vel = (c_vel + (gravity * dt)) * 0.995
+            local ray_dir = next_pos - c_pos
+            if ray_dir.Magnitude < 0.01 then break end
+
+            local ray_res = workspace:Raycast(c_pos, ray_dir, grenade_ray_params)
+            if ray_res then
+                local hit_pos = ray_res.Position
+                local normal = ray_res.Normal
+                last_norm = normal
+                table.insert(pts, hit_pos)
+
+                if is_impact_val then break end
+
+                local mat_name = ray_res.Material and ray_res.Material.Name or "Default"
+                local mat_restitution_mult = 1.0
+                local mat_friction = 0.75
+                if mat_name == "Grass" or mat_name == "Ground" or mat_name == "Mud" or mat_name == "Sand" or mat_name == "Terrain" then
+                    mat_restitution_mult = 0.70
+                    mat_friction = 0.50
+                elseif mat_name == "Metal" or mat_name == "DiamondPlate" or mat_name == "CorrodedMetal" then
+                    mat_restitution_mult = 1.15
+                    mat_friction = 0.85
+                elseif mat_name == "Wood" or mat_name == "WoodPlanks" then
+                    mat_restitution_mult = 0.90
+                    mat_friction = 0.65
+                end
+                local effective_bounciness = bounciness_val * mat_restitution_mult
+
+                local dot = c_vel:Dot(normal)
+                if dot < 0 then
+                    local perp = normal * dot
+                    local tang = c_vel - perp
+                    c_vel = (tang * mat_friction) - (perp * effective_bounciness)
+                end
+
+                c_bounces = c_bounces + 1
+                if c_vel.Magnitude < 6 or (normal.Y > 0.5 and math.abs(dot) < 4 and c_vel.Magnitude < 10) then
+                    break
+                end
+                c_pos = hit_pos + (normal * 0.08)
+            else
+                c_pos = next_pos
+                c_vel = next_vel
+                table.insert(pts, c_pos)
+            end
+            elapsed = elapsed + dt
+        end
+        return pts, last_norm
+    end
+
+    local function hide_grenade_trajectory()
+        for i = 1, MAX_GRENADE_PARTS do
+            grenade_3d_parts[i].Transparency = 1
+        end
+        impact_ball_adornment.Visible = false
+        blast_ring_adornment.Transparency = 1
+    end
+
+    -- RenderStepped loop: predict trajectory while holding a grenade
+    cheat.utility.new_renderstepped(function(delta)
+        local pred_enabled = cheat.grenade_predict_enabled or
+            (cheat.Toggles and cheat.Toggles.grenade_predict and cheat.Toggles.grenade_predict.Value)
+        if not pred_enabled then
+            hide_grenade_trajectory()
+            return
+        end
+
+        local grenade_info = get_held_grenade_info()
+        if not grenade_info then
+            hide_grenade_trajectory()
+            return
+        end
+
+        local char = LocalPlayer.Character
+        if not (char and Camera) then
+            hide_grenade_trajectory()
+            return
+        end
+
+        local is_underhand = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        local throw_speed = is_underhand and (grenade_info.underhand_speed or 45) or (grenade_info.overhand_speed or 105)
+
+        local cam_cf = Camera.CFrame
+        local est_pos = nil
+        pcall(function()
+            local fle = require(ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("FunctionLibraryExtension") or nil)
+            if fle and fle.GetEstimatedCameraPosition then
+                est_pos = fle:GetEstimatedCameraPosition(LocalPlayer)
+            end
+        end)
+        local origin_base = est_pos or cam_cf.Position
+        local origin = origin_base + (cam_cf.LookVector * 1.3)
+        local char_vel = (char.PrimaryPart and char.PrimaryPart.AssemblyLinearVelocity) or Vector3.zero
+        local vel = (cam_cf.LookVector * throw_speed) + (char_vel * 0.45)
+
+        local filter_list = { char, Camera, workspace:FindFirstChild("NoCollision"), traj_folder }
+        pcall(function()
+            local ut_mod = require(ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("UniversalTables") or nil)
+            if ut_mod and ut_mod.ReturnTable then
+                local ignorelist = ut_mod.ReturnTable("GlobalIgnoreListProjectile")
+                if type(ignorelist) == "table" then
+                    for _, inst in ipairs(ignorelist) do
+                        table.insert(filter_list, inst)
+                    end
+                end
+            end
+        end)
+        grenade_ray_params.FilterDescendantsInstances = filter_list
+
+        local max_time = grenade_info.fuse or 3.0
+        local max_bounces = cheat.grenade_predict_bounce_count or 3
+        local bounciness = grenade_info.bounciness or 0.35
+
+        local points, last_normal = simulate_trajectory_path(origin, vel, max_time, max_bounces, bounciness, grenade_info.is_rgo)
+        local line_color = cheat.grenade_predict_color or Color3.fromRGB(255, 80, 80)
+        local impact_color = cheat.grenade_predict_impact_color or Color3.fromRGB(255, 200, 50)
+        local line_idx = 1
+
+        for i = 1, #points - 1 do
+            if line_idx > MAX_GRENADE_PARTS then break end
+            local p1, p2 = points[i], points[i + 1]
+            local dist = (p2 - p1).Magnitude
+            if dist > 0.001 then
+                local p = grenade_3d_parts[line_idx]
+                p.Size = Vector3.new(0.12, 0.12, dist)
+                p.CFrame = CFrame.lookAt((p1 + p2) * 0.5, p2)
+                p.Color = line_color
+                p.Transparency = 0.1
+                line_idx = line_idx + 1
+            end
+        end
+
+        for i = line_idx, MAX_GRENADE_PARTS do
+            grenade_3d_parts[i].Transparency = 1
+        end
+
+        local final_pt = points[#points]
+        if final_pt then
+            local radius = grenade_info.radius or 8.5
+            local n = (last_normal and last_normal.Magnitude > 0.01) and last_normal.Unit or Vector3.new(0, 1, 0)
+            local right
+            if math.abs(n.Y) > 0.95 then
+                right = Vector3.new(1, 0, 0)
+            else
+                right = n:Cross(Vector3.new(0, 1, 0)).Unit
+            end
+            local up = n:Cross(right).Unit
+
+            impact_anchor.CFrame = CFrame.new(final_pt + (n * 0.55))
+            impact_ball_adornment.CFrame = CFrame.new(final_pt + (n * 0.55))
+            impact_ball_adornment.Color3 = impact_color
+            impact_ball_adornment.Radius = math.max(0.5, radius * 0.2)
+            impact_ball_adornment.Visible = true
+
+            ring_anchor.CFrame = CFrame.fromMatrix(final_pt + (n * 0.08), right, up, n)
+            blast_ring_adornment.Size = Vector3.new(math.max(0.5, radius * 2), 0.05, math.max(0.5, radius * 2))
+            blast_ring_adornment.Color = impact_color
+            -- Cylinder part lies along its X axis. We want it flat on ground: orient Y → up (n).
+            blast_ring_adornment.CFrame = CFrame.fromMatrix(final_pt + (n * 0.08), up, n, right)
+            blast_ring_adornment.Transparency = 0.4
+        else
+            impact_ball_adornment.Visible = false
+            blast_ring_adornment.Transparency = 1
+        end
+    end)
+
+    -- Cleanup on unload
+    if cheat.raw_conns then
+        table.insert(cheat.raw_conns, {
+            Disconnect = function()
+                pcall(function()
+                    for _, p in ipairs(grenade_3d_parts) do p:Destroy() end
+                    impact_anchor:Destroy()
+                    ring_anchor:Destroy()
+                    impact_ball_adornment:Destroy()
+                    blast_ring_adornment:Destroy()
+                    traj_folder:Destroy()
+                end)
+            end
+        })
+    end
+end)()
+
 -- [BLOCK 16] FINAL INIT
 -- ═══════════════════════════════════════════════════════════════════════════
 -- FIX #3: полный unload — чистит хуки, drawing'и, коннекты, GUI, parts, lighting,
@@ -8168,6 +8940,7 @@ end)()
 cheat.unload = function()
     if cheat._dead then return end
     cheat._dead = true
+    cheat.alive = false
 
     -- 1. Отключаем все raw-коннекты (диспетчер, noclip, freecam, chams renderstep, events).
     pcall(function()
