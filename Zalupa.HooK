@@ -252,14 +252,11 @@ local invcheck = {
     fullInventory = false, showCorpse = false,
     showValue = false, showTarget = false,
     targetColor = Color3.fromRGB(255, 255, 255),
-    mainScale = 1, fullScale = 1
 }
 local invCache = {
     lastTargetInventory = nil, lastFullInventory = nil,
     lastTargetValueName = nil, lastTargetValue = 0,
 }
-
-local mainScaleObj, fullScaleObj
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- [BLOCK 04] UTILITIES (диспетчеры)
@@ -492,8 +489,9 @@ _rep_recent_folder = _rep_recent_folder and _rep_recent_folder:FindFirstChild("R
 if _rep_recent_folder then
     cheat.utility.track_conn(_rep_recent_folder.ChildAdded:Connect(function(child)
         if not cheat.report_notifications then return end
-        local name = child.Name:match("(.+)_([^_]+)$")
-        if name == LocalPlayer.Name then
+        -- FIX #17: was `child.Name:match("(.+)_([^_]+)$")` which dropped names without an underscore
+        local prefix = child.Name:match("^(.-)_") or child.Name
+        if prefix == LocalPlayer.Name then
             Library:Notify({ Title = "Report", Description = "Added to Recent Reports list!", Time = 7 })
         end
     end))
@@ -615,9 +613,22 @@ TrigGroup:AddToggle("TrigManip", { Text = "Shoot On Manipulated", Default = fals
 
 local WeaponGroup = Tabs.Combat:AddRightGroupbox(L("grp_gun_mods"))
 WeaponGroup:AddToggle("NoSpread", { Text = "No Spread / No Drop", Default = true, Callback = function(v) silent_aim.nospread = v end })
-WeaponGroup:AddToggle("NoRecoil", { Text = "No Recoil", Default = false, Callback = function(v) norecoil = v; recoil_percent = v and 0 or recoil_percent end })
+local recoilToggle = WeaponGroup:AddToggle("NoRecoil", { Text = "No Recoil", Default = false, Callback = function(v)
+    norecoil = v
+    -- when toggle is turned ON directly (via the toggle, not the slider), reset recoil_percent to 0 (full no-recoil).
+    -- when turned OFF, keep slider value (so user can re-enable with their last setting).
+    if v then recoil_percent = 0 end
+end })
 WeaponGroup:AddSlider("RecoilPercent", { Text = "Recoil Amount", Min = 0, Max = 100, Rounding = 0, Default = 0, Suffix = "%", Tooltip = "0% = No Recoil, 100% = Full Original Recoil",
-    Callback = function(v) recoil_percent = v; if v > 0 then norecoil = true end end })
+    Callback = function(v)
+        -- FIX #6: sync the toggle UI when slider moves, but preserve recoil_percent (toggle callback would reset it to 0).
+        local was_on = recoilToggle.Value
+        if v > 0 and not was_on then
+            recoilToggle:SetValue(true)  -- fires toggle callback which sets recoil_percent = 0
+        end
+        recoil_percent = v  -- restore after potential toggle callback
+        norecoil = true
+    end })
 WeaponGroup:AddSlider("SpreadPercent", { Text = "Spread Amount", Min = 0, Max = 100, Rounding = 0, Default = 0, Suffix = "%", Tooltip = "0% = No Spread, 100% = Full Original Spread",
     Callback = function(v) spread_percent = v end })
 WeaponGroup:AddToggle("NoGunBob", { Text = "No Gun Bob", Default = false, Callback = function(v) nobob = v end })
@@ -634,12 +645,13 @@ WeaponGroup:AddToggle("InstantMosin", { Text = "Instant Mosin (R7)", Default = f
         if not ammo then return end
         if v then
             for _,a in pairs(ammo:GetChildren()) do
-                if not original_recoils[a] then original_recoils[a] = a:GetAttribute("RecoilStrength") end
+                -- FIX #18: keyed by NAME (was Instance — leaked on respawn, never restored for new instances)
+                if original_recoils[a.Name] == nil then original_recoils[a.Name] = a:GetAttribute("RecoilStrength") end
                 a:SetAttribute("RecoilStrength", 1)
             end
         else
             for _,a in pairs(ammo:GetChildren()) do
-                if original_recoils[a] then a:SetAttribute("RecoilStrength", original_recoils[a]) end
+                if original_recoils[a.Name] ~= nil then a:SetAttribute("RecoilStrength", original_recoils[a.Name]) end
             end
         end
     end)
@@ -804,7 +816,8 @@ task.spawn(function()
     local fps_module
     pcall(function() fps_module = require(ReplicatedStorage.Modules.FPS) end)
     if not fps_module then return end
-    local update_fps = getupvalue(fps_module.new, 5)
+    local update_fps
+    pcall(function() update_fps = getupvalue(fps_module.new, 5) end)
 
     local fps_reloadtypes, fps_usetypes
     for _, v in getgc(true) do
@@ -985,7 +998,8 @@ task.spawn(function()
 
     -- Auto reload (из pin.reta — упрощённый, без useDebounce проверки которая блокировала)
     if fps_usetypes then
-        local remove_bullet = getupvalue(fps_usetypes.RangedWeaponDefault, 4)
+        local remove_bullet
+        pcall(function() remove_bullet = getupvalue(fps_usetypes.RangedWeaponDefault, 4) end)
         if remove_bullet then
             new_hook(remove_bullet, function(old, fps_object, ...)
                 local hmm = {old(fps_object, ...)}
@@ -1072,14 +1086,30 @@ InvTargetToggle:AddColorPicker("InvCheckTargetColor", {
     Title = "Target Text Color", Default = Color3.fromRGB(255, 255, 255),
     Callback = function(v) invcheck.targetColor = v end
 })
-InvGroup:AddSlider("InvMainScale", { Text = "Main Inv Scale", Min = 0.5, Max = 2, Rounding = 2, Default = 1, Callback = function(v)
-    invcheck.mainScale = v
-    if mainScaleObj then mainScaleObj.Scale = v end
-end })
-InvGroup:AddSlider("InvFullScale", { Text = "Full Inv Scale", Min = 0.5, Max = 2, Rounding = 2, Default = 1, Callback = function(v)
-    invcheck.fullScale = v
-    if fullScaleObj then fullScaleObj.Scale = v end
-end })
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- [BLOCK 06] INVENTORY CHECKER — ported EXACTLY from Lirp (r52_0 / r92_0 / r93_0 /
+-- r94_0 / r95_0 / r96_0). All slots parented directly to the ScreenGui (no draggable
+-- containers). Positions computed from AbsoluteSize.X (viewport width) once at init.
+-- UICorner is intentionally OMITTED (per dj's request — "только скругление убери").
+--
+-- Lirp layout (kept point-for-point):
+--   mainSlots   [1..12]  ImageLabel  60×60   RGB(30,30,30)        transparency 0.25
+--       • slots 1-3 → weapons (X step 85,  centered via (W-960)/2)
+--       • slots 4-12 → clothing (X step 80, centered via (W-935)/2)
+--   attachSlots [1..12]  ImageLabel  25×20   colored by weapon group    transparency 0.20  ZIndex 2
+--       • 1-4   red   RGB(155,20,30)   X step 21, centered via (W-985)/2
+--       • 5-8   blue  RGB(30,50,155)   X step 21, centered via (W-980)/2
+--       • 9-12  green RGB(50,155,30)   X step 21, centered via (W-975)/2
+--   fullSlots   [1..54]  ImageLabel  35×35   RGB(0,0,0)          transparency 0.35
+--   fullCounts  [1..54]  TextLabel   20×15   transparent BG, white text, TextScaled=true
+--       • 6 per row × 9 rows; X step 40, Y step 40, start Y=100 (count Y = slot Y + 24)
+--       • X = (W+500)/2 + (col)*40    (slot)
+--       • X = (W+518)/2 + (col)*40    (count, offset +9 from slot)
+--   infoLabel (r56_0):  Size (0.19,0,0.03,0)  Pos (0.5,0,0.08,0)  Anchor (0.5,0.5)
+--                       TextScaled, GothamSemibold, white, transparent BG
+-- Visibility: VisibilityToggle(show) iterates slots; full grid gated by invcheck.fullInventory
+-- ═══════════════════════════════════════════════════════════════════════════
 
 local alenInvGui = Instance.new("ScreenGui")
 alenInvGui.Name = "ZalupaStatsViewer"
@@ -1092,126 +1122,106 @@ if not alenInvGui.Parent then alenInvGui.Parent = LocalPlayer:WaitForChild("Play
 cheat.utility.track_gui(alenInvGui)
 
 local EMPTY_ICON = "rbxassetid://12459616555"
+local _screenW = Camera.ViewportSize.X
 
-local function makeDraggable(frame)
-    local dragging, dragInput, dragStart, startPos
-    frame.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = frame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
-        end
-    end)
-    frame.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput = input
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if input == dragInput and dragging then
-            local delta = input.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end)
-end
-
-local mainContainer = Instance.new("Frame", alenInvGui)
-mainContainer.Name = "MainInv"
-mainContainer.Size = UDim2.new(0, 235, 0, 520)
-mainContainer.Position = UDim2.new(0.5, -300, 0.5, -200)
-mainContainer.BackgroundTransparency = 1
-mainContainer.Visible = false
-mainContainer.Active = true
-makeDraggable(mainContainer)
-mainScaleObj = Instance.new("UIScale", mainContainer)
-mainScaleObj.Scale = invcheck.mainScale
-
-local infoLabel = Instance.new("TextLabel", mainContainer)
-infoLabel.Size = UDim2.new(1, 0, 0, 30)
-infoLabel.Position = UDim2.new(0, 0, 0, -35)
+-- r56_0 port: "Viewing Name | Corpse | $value" label (anchored top-center, scaled to screen %)
+local infoLabel = Instance.new("TextLabel", alenInvGui)
+infoLabel.Size = UDim2.new(0.19, 0, 0.03, 0)
+infoLabel.Position = UDim2.new(0.5, 0, 0.08, 0)
+infoLabel.AnchorPoint = Vector2.new(0.5, 0.5)
 infoLabel.BackgroundTransparency = 1
-infoLabel.TextColor3 = invcheck.targetColor
-infoLabel.Font = Enum.Font.GothamBold
-infoLabel.TextSize = 18
-infoLabel.TextStrokeTransparency = 0.5
-infoLabel.TextStrokeColor3 = Color3.new(0,0,0)
+infoLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+infoLabel.Font = Enum.Font.GothamSemibold
+infoLabel.Visible = false
+infoLabel.TextScaled = true
 infoLabel.Text = ""
 
-local mainGrid = Instance.new("UIGridLayout", mainContainer)
-mainGrid.CellSize = UDim2.new(0, 65, 0, 130)
-mainGrid.CellPadding = UDim2.new(0, 10, 0, 10)
-mainGrid.FillDirectionMaxCells = 3
-mainGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
-
+-- r92_0: main slots (12 cells, 60×60, RGB(30,30,30), transparency 0.25)
 local mainSlots = {}
 for i = 1, 12 do
-    local slotFrame = Instance.new("Frame", mainContainer)
-    slotFrame.BackgroundTransparency = 1
-    local itemImg = Instance.new("ImageLabel", slotFrame)
-    itemImg.Size = UDim2.new(0, 65, 0, 65)
-    itemImg.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-    itemImg.BackgroundTransparency = 0.3
-    local attachFrame = Instance.new("Frame", slotFrame)
-    attachFrame.Size = UDim2.new(0, 65, 0, 45)
-    attachFrame.Position = UDim2.new(0, 0, 0, 70)
-    attachFrame.BackgroundTransparency = 1
-    local attachGrid = Instance.new("UIGridLayout", attachFrame)
-    attachGrid.CellSize = UDim2.new(0, 28, 0, 28)
-    attachGrid.CellPadding = UDim2.new(0, 3, 0, 3)
-    attachGrid.FillDirectionMaxCells = 2
-    attachGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
-    local attachSlots = {}
-    for j = 1, 4 do
-        local aImg = Instance.new("ImageLabel", attachFrame)
-        aImg.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-        aImg.BackgroundTransparency = 0.3
-        attachSlots[j] = aImg
+    local img = Instance.new("ImageLabel", alenInvGui)
+    img.Visible = false
+    img.Size = UDim2.new(0, 60, 0, 60)
+    img.BackgroundTransparency = 0.25
+    img.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    if i <= 3 then
+        img.Position = UDim2.new(0, (_screenW - 135 - 825) / 2 + (i - 1) * 85, 0, 0)
+    else
+        img.Position = UDim2.new(0, (_screenW - 135 - 800) / 2 + (i - 1) * 80, 0, 0)
     end
-    mainSlots[i] = { Frame = slotFrame, Item = itemImg, Attach = attachSlots }
+    mainSlots[i] = img
 end
 
-local fullContainer = Instance.new("Frame", alenInvGui)
-fullContainer.Name = "FullInv"
-fullContainer.Size = UDim2.new(0, 360, 0, 240)
-fullContainer.Position = UDim2.new(0.5, -300, 0.5, 330)
-fullContainer.BackgroundTransparency = 1
-fullContainer.Visible = false
-fullContainer.Active = true
-makeDraggable(fullContainer)
-fullScaleObj = Instance.new("UIScale", fullContainer)
-fullScaleObj.Scale = invcheck.fullScale
+-- r95_0: attachment slots (12 cells, 25×20, color by weapon group, transparency 0.2, ZIndex 2)
+local attachSlots = {}
+for i = 1, 12 do
+    local img = Instance.new("ImageLabel", alenInvGui)
+    img.Visible = false
+    img.Size = UDim2.new(0, 25, 0, 20)
+    img.BackgroundTransparency = 0.2
+    img.ZIndex = 2
+    if i <= 4 then
+        img.Position = UDim2.new(0, (_screenW - 135 - 850) / 2 + (i - 1) * 21, 0, 55)
+        img.BackgroundColor3 = Color3.fromRGB(155, 20, 30)
+    elseif i <= 8 then
+        img.Position = UDim2.new(0, (_screenW - 135 - 845) / 2 + (i - 1) * 21, 0, 55)
+        img.BackgroundColor3 = Color3.fromRGB(30, 50, 155)
+    else
+        img.Position = UDim2.new(0, (_screenW - 135 - 840) / 2 + (i - 1) * 21, 0, 55)
+        img.BackgroundColor3 = Color3.fromRGB(50, 155, 30)
+    end
+    attachSlots[i] = img
+end
 
-local fullGrid = Instance.new("UIGridLayout", fullContainer)
-fullGrid.CellSize = UDim2.new(0, 35, 0, 35)
-fullGrid.CellPadding = UDim2.new(0, 5, 0, 5)
-fullGrid.FillDirectionMaxCells = 9
-fullGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
-
+-- r93_0 / r94_0: full inventory grid (54 cells + 54 count labels)
 local fullSlots, fullCounts = {}, {}
 for i = 1, 54 do
-    local fImg = Instance.new("ImageLabel", fullContainer)
-    fImg.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-    fImg.BackgroundTransparency = 0.3
-    local txt = Instance.new("TextLabel", fImg)
-    txt.Size = UDim2.new(1, 0, 1, 0)
+    local img = Instance.new("ImageLabel", alenInvGui)
+    img.Visible = false
+    img.Size = UDim2.new(0, 35, 0, 35)
+    img.BackgroundTransparency = 0.35
+    img.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+
+    local txt = Instance.new("TextLabel", alenInvGui)
+    txt.Visible = true
+    txt.Text = ""
+    txt.TextScaled = true
+    txt.Size = UDim2.new(0, 20, 0, 15)
     txt.BackgroundTransparency = 1
     txt.TextColor3 = Color3.fromRGB(255, 255, 255)
-    txt.Font = Enum.Font.GothamBold
-    txt.TextSize = 10
-    txt.TextStrokeTransparency = 0.5
-    txt.TextStrokeColor3 = Color3.new(0,0,0)
-    txt.Text = ""
-    txt.ZIndex = 2
-    fullSlots[i] = fImg
+
+    -- Lirp position formula: 6 per row × 9 rows, X step 40, Y step 40 (count Y = slot Y + 24)
+    local row, col
+    if     i <=  6 then row, col = 0, i - 1
+    elseif i <= 12 then row, col = 1, i - 7
+    elseif i <= 18 then row, col = 2, i - 13
+    elseif i <= 24 then row, col = 3, i - 19
+    elseif i <= 30 then row, col = 4, i - 25
+    elseif i <= 36 then row, col = 5, i - 31
+    elseif i <= 42 then row, col = 6, i - 37
+    elseif i <= 48 then row, col = 7, i - 43
+    else                 row, col = 8, i - 49 end
+    img.Position = UDim2.new(0, (_screenW + 500) / 2 + col * 40, 0, 100 + row * 40)
+    txt.Position = UDim2.new(0, (_screenW + 518) / 2 + col * 40, 0, 124 + row * 40)
+
+    fullSlots[i] = img
     fullCounts[i] = txt
 end
 
-local function updateInvVisibility(show)
-    mainContainer.Visible = show
-    fullContainer.Visible = show and invcheck.fullInventory
+-- r96_0.LastVisibility + VisibilityToggle — replaces updateInvVisibility
+local _inv_last_visibility = false
+local function VisibilityToggle(show)
+    if show == _inv_last_visibility then return end
+    _inv_last_visibility = show
+    local fullShow = show and invcheck.fullInventory or false
+    for i = 1, 12 do
+        mainSlots[i].Visible = show
+        attachSlots[i].Visible = show
+    end
+    for i = 1, 54 do
+        fullSlots[i].Visible = fullShow
+        fullCounts[i].Visible = fullShow
+    end
 end
 
 local function getInvItemsList() return ItemsListFolder or ReplicatedStorage:FindFirstChild("ItemsList") end
@@ -1222,6 +1232,10 @@ local function getInvContainer(target)
     return plrFolder and plrFolder:FindFirstChild("Inventory")
 end
 
+-- Lirp r97_0 port: render target's inventory into the flat grid.
+-- Weapons fill mainSlots[1..3], clothing fills mainSlots[4..12].
+-- Each weapon's 4 attachments go into attachSlots[offset+1..offset+4]
+-- where offset = 0,4,8 for weapons 1,2,3 respectively.
 local function populateInvData(target)
     if not target or target.Name == LocalPlayer.Name then return end
     local itemsList = getInvItemsList()
@@ -1231,32 +1245,32 @@ local function populateInvData(target)
     invCache.lastFullInventory = invcheck.fullInventory
     local inventory = getInvContainer(target)
     if not inventory then return end
-    for i = 1, 12 do
-        mainSlots[i].Item.Image = EMPTY_ICON
-        if mainSlots[i].Attach then
-            for j = 1, 4 do mainSlots[i].Attach[j].Image = EMPTY_ICON end
-        end
-    end
+    -- Clear top + attach rows
+    for i = 1, 12 do mainSlots[i].Image = EMPTY_ICON end
+    for i = 1, 12 do attachSlots[i].Image = EMPTY_ICON end
+    -- Clear full grid
     for i = 1, 54 do
         fullSlots[i].Image = EMPTY_ICON
         fullCounts[i].Text = ""
     end
-    local weaponIdx = 1
-    local clothingIdx = 4
+    -- Lirp indices
+    local weaponIdx = 1     -- mainSlots[1..3]
+    local clothingIdx = 4   -- mainSlots[4..12]
+    local attachOffset = 0  -- attachSlots base offset (0 → 4 → 8)
     for _, item in pairs(inventory:GetChildren()) do
         local slot = item:GetAttribute("Slot")
         if slot and slot:find("Clothing") then
             local itemDef = itemsList:FindFirstChild(item.Name)
             local icon = itemDef and itemDef:FindFirstChild("ItemProperties") and itemDef.ItemProperties:FindFirstChild("ItemIcon")
             if icon and clothingIdx <= 12 then
-                mainSlots[clothingIdx].Item.Image = icon.Image
+                mainSlots[clothingIdx].Image = icon.Image
                 clothingIdx = clothingIdx + 1
             end
         elseif item:FindFirstChild("Attachments") then
             local itemDef = itemsList:FindFirstChild(item.Name)
             local icon = itemDef and itemDef:FindFirstChild("ItemProperties") and itemDef.ItemProperties:FindFirstChild("ItemIcon")
             if icon and weaponIdx <= 3 then
-                mainSlots[weaponIdx].Item.Image = icon.Image
+                mainSlots[weaponIdx].Image = icon.Image
                 for _, att in pairs(item.Attachments:GetChildren()) do
                     local attSlot = att:GetAttribute("Slot")
                     local attDef = itemsList:FindFirstChild(att.Name)
@@ -1267,13 +1281,15 @@ local function populateInvData(target)
                     elseif attSlot == "Extra" then idx = 4 end
                     if idx and attDef then
                         local aicon = attDef:FindFirstChild("ItemProperties") and attDef.ItemProperties:FindFirstChild("ItemIcon")
-                        if aicon then mainSlots[weaponIdx].Attach[idx].Image = aicon.Image end
+                        if aicon then attachSlots[idx + attachOffset].Image = aicon.Image end
                     end
                 end
                 weaponIdx = weaponIdx + 1
+                attachOffset = attachOffset + 4
             end
         end
     end
+    -- Full inventory grid (Lirp r97_0 second pass)
     if invcheck.fullInventory then
         local idx = 1
         for _, container in pairs(inventory:GetChildren()) do
@@ -1297,6 +1313,11 @@ local function populateInvData(target)
     end
 end
 
+-- Lirp r98_0 port: total ruble-equivalent value of target's inventory.
+-- For each Clothing-slot container's nested Inventory items:
+--   Rubles → add Amount directly
+--   Else   → ItemProperties.Price × multiplier by ItemType (Extra .4, Ammo .7×Amount, Clothing .35, Medical .75, Barter .4)
+-- Only counts items with Price >= 10.
 local function getInvValue(target)
     if invCache.lastTargetValueName == target then return invCache.lastTargetValue end
     local itemsList = getInvItemsList()
@@ -1334,22 +1355,44 @@ local function getInvValue(target)
     return math.floor(total)
 end
 
+-- Lirp r101_0 port: pick which target to inspect.
+-- LastTarget = silent_aim.target_part.Parent (the aimbot's current victim).
+--   • No LastTarget       → find closest live player to crosshair
+--   • LastTarget has Head → still find closest live player (overwrites)
+--   • LastTarget no Head  → return LastTarget directly (dead target = treat as corpse)
+-- Then if "Check Corpses" is on, also iterate Workspace.DroppedItems for the
+-- closest corpse (Humanoid + Head + no AttackedBy); closest of player/corpse wins.
 local function getInvTarget()
     local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     local best, bestDist = nil, 1000
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            local head = plr.Character:FindFirstChild("Head")
-            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-            if head and hum and hum.Health > 0 then
-                local pos, onScreen = Camera:WorldToViewportPoint(head.Position)
-                if onScreen and pos.Z > 0 then
-                    local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
-                    if d < bestDist then bestDist = d; best = plr end
+    local lastTarget = silent_aim.target_part and silent_aim.target_part.Parent
+
+    local function find_closest_player()
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local char = plr.Character
+                local head = char:FindFirstChild("Head")
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local aimPart = char:FindFirstChild(silent_aim.part or "Head")
+                if head and hum and hum.Health > 0 and aimPart then
+                    local pos, onScreen = Camera:WorldToViewportPoint(aimPart.Position)
+                    if onScreen and pos.Z > 0 then
+                        local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+                        if d < bestDist then bestDist = d; best = plr end
+                    end
                 end
             end
         end
     end
+
+    if not lastTarget then
+        find_closest_player()
+    elseif lastTarget:FindFirstChild("Head") then
+        find_closest_player()
+    else
+        return lastTarget  -- aimbot's dead target — return it as a corpse directly
+    end
+
     if invcheck.showCorpse then
         local dropped = Workspace:FindFirstChild("DroppedItems")
         if dropped then
@@ -1372,8 +1415,9 @@ local _inv_acc = 0
 local _inv_was_visible = false
 cheat.utility.new_heartbeat(function(delta)
     if not invcheck.enabled then
-        if _inv_was_visible then updateInvVisibility(false); _inv_was_visible = false end
+        if _inv_was_visible then VisibilityToggle(false); _inv_was_visible = false end
         invCache.lastTargetInventory = nil
+        infoLabel.Visible = false
         return
     end
     _inv_acc = _inv_acc + delta
@@ -1381,21 +1425,25 @@ cheat.utility.new_heartbeat(function(delta)
     _inv_acc = 0
     local target = getInvTarget()
     if not target then
-        if _inv_was_visible then updateInvVisibility(false); _inv_was_visible = false end
+        if _inv_was_visible then VisibilityToggle(false); _inv_was_visible = false end
         invCache.lastTargetInventory = nil
+        infoLabel.Visible = false
         return
     end
     populateInvData(target)
-    updateInvVisibility(true)
+    VisibilityToggle(true)
     _inv_was_visible = true
     if invcheck.showTarget then
-        local labelText = target.Name
-        if target:FindFirstChild("Humanoid") then labelText = labelText .. " [CORPSE]" end
+        -- Lirp label format: "Viewing <Name> | <Corpse|Inventory> | $<value>"
+        local suffix = " | Inventory"
+        if target:FindFirstChild("Head") then suffix = " | Corpse" end
+        local labelText = "Viewing " .. target.Name .. suffix
         if invcheck.showValue then labelText = labelText .. " | $" .. getInvValue(target) end
         infoLabel.Text = labelText
         infoLabel.TextColor3 = invcheck.targetColor
+        infoLabel.Visible = true
     else
-        infoLabel.Text = ""
+        infoLabel.Visible = false
     end
 end)
 
@@ -2014,7 +2062,16 @@ cheat.EspLibrary = {} do
                     cham.FillColor = Color3.fromHSV(hpp*(1/3), math.clamp(settings.chams_saturation or 1, 0, 1), 1)
                     cham.FillTransparency = math.clamp(settings.chams_fill_color[2] + int_off, 0, 0.99)
                 elseif settings.chams_visible_split then
-                    local vis = silent_aim and silent_aim.isvisible or false
+                    -- Per-character visibility check (was: silent_aim.isvisible — colored EVERY player by current aim target)
+                    local vis = false
+                    local hrp_part = character:FindFirstChild("HumanoidRootPart") or head
+                    if hrp_part then
+                        local rp = RaycastParams.new()
+                        rp.FilterType = Enum.RaycastFilterType.Exclude
+                        rp.FilterDescendantsInstances = { character, get_nocollision(), Camera }
+                        local cast = workspace:Raycast(camera.CFrame.p, hrp_part.Position - camera.CFrame.p, rp)
+                        vis = (not cast) or (cast.Instance and cast.Instance:IsDescendantOf(character))
+                    end
                     if vis then
                         cham.FillColor, cham.FillTransparency = settings.chams_fill_color[1], math.clamp(settings.chams_fill_color[2]+int_off, 0, 0.99)
                     else
@@ -2263,7 +2320,6 @@ end
 -- ═══════════════════════════════════════════════════════════════════════════
 local ESPL = Tabs.Visuals:AddLeftGroupbox(L("grp_player_esp"))
 local ESPR = Tabs.Visuals:AddRightGroupbox(L("grp_esp_options"))
-local WorldGroup = Tabs.Visuals:AddLeftGroupbox(L("grp_world"))
 local CameraGroup = Tabs.Visuals:AddRightGroupbox(L("grp_camera"))
 local ViewmodelGroup = Tabs.Visuals:AddLeftGroupbox(L("grp_viewmodel"))
 local ItemFinderGroup = Tabs.Visuals:AddRightGroupbox(L("grp_item_finder"))
@@ -2401,89 +2457,268 @@ end
 -- ═══════════════════════════════════════════════════════════════════════════
 -- [BLOCK 09b] WORLD & LIGHTING
 -- ═══════════════════════════════════════════════════════════════════════════
-WorldGroup:AddToggle("Fullbright", { Text = "Fullbright", Default = false, Callback = function(v) world_globals.fullbright = v end })
-WorldGroup:AddToggle("NoFog", { Text = "No Fog", Default = false, Callback = function(v)
-    world_globals.nofog = v
-    if v then
-        if not cheat._fog_snapshot then
-            cheat._fog_snapshot = {
-                FogEnd = Lighting.FogEnd,
-                FogStart = Lighting.FogStart,
-                atmospheres = {},
-            }
-            for _, child in ipairs(Lighting:GetChildren()) do
-                if child:IsA("Atmosphere") then
-                    cheat._fog_snapshot.atmospheres[child] = {
-                        Density = child.Density, Haze = child.Haze, Glare = child.Glare, Offset = child.Offset,
-                    }
-                end
-            end
-            for _, child in ipairs(workspace:GetDescendants()) do
-                if child:IsA("Atmosphere") and not cheat._fog_snapshot.atmospheres[child] then
-                    cheat._fog_snapshot.atmospheres[child] = {
-                        Density = child.Density, Haze = child.Haze, Glare = child.Glare, Offset = child.Offset,
-                    }
-                end
-            end
-        end
-        Lighting.FogEnd = 100000000
-        Lighting.FogStart = 100000000
-        for atmo, _ in pairs(cheat._fog_snapshot.atmospheres) do
-            if atmo and atmo.Parent then
-                atmo.Density = 0; atmo.Haze = 0; atmo.Glare = 0; atmo.Offset = 0
-            end
-        end
-        -- Listeners чтобы туман не возвращался при респавне
-        if not cheat._fog_listeners then
-            cheat._fog_listeners = {}
-            for atmo, _ in pairs(cheat._fog_snapshot.atmospheres) do
-                cheat._fog_listeners[#cheat._fog_listeners+1] = atmo:GetPropertyChangedSignal("Density"):Connect(function()
-                    if world_globals.nofog and atmo.Density ~= 0 then
-                        atmo.Density = 0; atmo.Haze = 0; atmo.Glare = 0; atmo.Offset = 0
-                    end
-                end)
-            end
-        end
-        cheat.utility.track_conn(Lighting.ChildAdded:Connect(function(child)
-            if world_globals.nofog and child:IsA("Atmosphere") then
-                if not cheat._fog_snapshot.atmospheres[child] then
-                    cheat._fog_snapshot.atmospheres[child] = {Density=child.Density, Haze=child.Haze, Glare=child.Glare, Offset=child.Offset}
-                end
-                child.Density = 0; child.Haze = 0; child.Glare = 0; child.Offset = 0
-                cheat.utility.track_conn(child:GetPropertyChangedSignal("Density"):Connect(function()
-                    if world_globals.nofog and child.Density ~= 0 then
-                        child.Density = 0; child.Haze = 0; child.Glare = 0; child.Offset = 0
-                    end
-                end))
-            end
-        end))
-    else
-        if cheat._fog_snapshot then
-            Lighting.FogEnd = cheat._fog_snapshot.FogEnd or 100000
-            Lighting.FogStart = cheat._fog_snapshot.FogStart or 0
-            for atmo, orig in pairs(cheat._fog_snapshot.atmospheres) do
-                if atmo and atmo.Parent then
-                    atmo.Density = orig.Density or 0.3
-                    atmo.Haze = orig.Haze or 0
-                    atmo.Glare = orig.Glare or 0
-                    atmo.Offset = orig.Offset or 0
-                end
-            end
-            cheat._fog_snapshot = nil
-        end
-        if cheat._fog_listeners then
-            for _, c in ipairs(cheat._fog_listeners) do pcall(function() c:Disconnect() end) end
-            cheat._fog_listeners = nil
+-- FIX #12: snapshot for Fullbright/NoShadows restore (was: only wrote, never restored)
+local _lighting_baseline = nil
+local function _snapshot_lighting_baseline()
+    if _lighting_baseline then return end
+    _lighting_baseline = {
+        Brightness = Lighting.Brightness,
+        OutdoorAmbient = Lighting.OutdoorAmbient,
+        Ambient = Lighting.Ambient,
+        GlobalShadows = Lighting.GlobalShadows,
+    }
+end
+local function _restore_lighting_baseline()
+    if not _lighting_baseline then return end
+    pcall(function()
+        Lighting.Brightness = _lighting_baseline.Brightness
+        Lighting.OutdoorAmbient = _lighting_baseline.OutdoorAmbient
+        Lighting.Ambient = _lighting_baseline.Ambient
+        Lighting.GlobalShadows = _lighting_baseline.GlobalShadows
+    end)
+    _lighting_baseline = nil
+end
+-- Expose for cheat.unload()
+cheat._baseline_lighting_restore = _restore_lighting_baseline
+
+-- FIX #5/#11/#19/#21: snapshot/state tables and Decoration helpers declared BEFORE
+-- any toggle callback that references them (Lua forward refs bind to globals otherwise).
+local _leafs_loop_active = false
+local _leafs_original = nil
+local _grass_baseline = nil
+
+-- FIX #21: `Decoration` is a regular (public) Terrain property on modern Roblox.
+-- The original code used `sethiddenproperty` which throws "Decoration is not a valid member"
+-- on executors/games where the property is exposed normally. Detect once which path works
+-- and use direct property access when available, fall back to sethiddenproperty otherwise.
+--
+-- FIX (dj regression): the original FIX #21 unconditionally tried to set
+-- `Enum.TerrainDecoration.None` to disable grass — but that enum doesn't exist on
+-- dj's Roblox version. On older builds `Terrain.Decoration` is a plain bool. We must
+-- detect the value TYPE at first read and use a matching type when disabling:
+--   • bool baseline    → write `false` to disable, original bool to restore
+--   • enum baseline    → write that same enum back, OR if the baseline looks like
+--     "no decoration" already (Decoration==0 or false), skip writing entirely
+--   • unknown / no API → skip silently
+local _terrain_decoration_strategy = nil  -- nil | "direct" | "hidden" | "none"
+local _terrain_decoration_type    = nil   -- "bool" | "enum" | nil
+
+local function _terrain_decoration_method()
+    if _terrain_decoration_strategy ~= nil then return _terrain_decoration_strategy end
+    -- Test 1: direct property read (regular Roblox API)
+    local ok_read = pcall(function() local _ = workspace.Terrain.Decoration end)
+    if ok_read then
+        _terrain_decoration_strategy = "direct"
+        return _terrain_decoration_strategy
+    end
+    -- Test 2: hidden property via executor API
+    if sethiddenproperty and gethiddenproperty then
+        local ok_hidden = pcall(gethiddenproperty, workspace.Terrain, "Decoration")
+        if ok_hidden then
+            _terrain_decoration_strategy = "hidden"
+            return _terrain_decoration_strategy
         end
     end
-end })
-WorldGroup:AddToggle("NoShadows", { Text = "No Shadows", Default = false, Callback = function(v) world_globals.noshadows = v end })
-WorldGroup:AddToggle("NoGrass", { Text = "No Grass", Default = false, Callback = function(v) pcall(function() sethiddenproperty(workspace.Terrain, "Decoration", not v) end) end })
-WorldGroup:AddToggle("NoClouds", { Text = "No Clouds", Default = false, Callback = function(v)
-    local clouds = workspace.Terrain:FindFirstChildOfClass("Clouds")
-    if clouds then clouds.Enabled = not v end
-end })
-WorldGroup:AddToggle("NoLeafs", { Text = "No Leafs", Default = false, Callback = function(v) world_globals.noleafs = v end })
+    _terrain_decoration_strategy = "none"
+    return _terrain_decoration_strategy
+end
+
+local function _terrain_decoration_get()
+    local method = _terrain_decoration_method()
+    if method == "direct" then
+        local ok, val = pcall(function() return workspace.Terrain.Decoration end)
+        if ok then
+            -- Detect type on first successful read: bool or enum
+            if _terrain_decoration_type == nil then
+                if typeof(val) == "boolean" then _terrain_decoration_type = "bool"
+                elseif typeof(val) == "EnumItem" then _terrain_decoration_type = "enum"
+                else _terrain_decoration_type = "other" end
+            end
+            return val
+        end
+    elseif method == "hidden" then
+        local ok, val = pcall(gethiddenproperty, workspace.Terrain, "Decoration")
+        if ok then
+            if _terrain_decoration_type == nil then
+                if typeof(val) == "boolean" then _terrain_decoration_type = "bool"
+                elseif typeof(val) == "EnumItem" then _terrain_decoration_type = "enum"
+                else _terrain_decoration_type = "other" end
+            end
+            return val
+        end
+    end
+    return nil
+end
+
+-- Returns the "disabled" value for the detected Decoration type — never throws.
+--   • bool    → false
+--   • enum    → Enum.TerrainDecoration.None if that enum exists on this Roblox
+--               build, otherwise nil (no-op; the toggle will just do nothing)
+--   • other   → nil
+local function _terrain_decoration_disabled_value()
+    if _terrain_decoration_type == "bool" then return false end
+    if _terrain_decoration_type == "enum" then
+        -- Pcall the enum lookup — on dj's Roblox `Enum.TerrainDecoration` doesn't exist
+        local ok, val = pcall(function() return Enum.TerrainDecoration.None end)
+        if ok then return val end
+        return nil
+    end
+    return nil
+end
+
+local function _terrain_decoration_set(val)
+    local method = _terrain_decoration_method()
+    if method == "direct" then
+        local ok = pcall(function() workspace.Terrain.Decoration = val end)
+        return ok
+    elseif method == "hidden" then
+        local ok = pcall(sethiddenproperty, workspace.Terrain, "Decoration", val)
+        return ok
+    end
+    return false
+end
+
+-- FIX #22: moved skybox/potato state + helpers to file scope (was inside BLOCK 19 IIFE
+-- which we deleted; World tab now owns these toggles and needs access to the helpers).
+local grad_col1, grad_col2 = Color3.fromRGB(90,90,90), Color3.fromRGB(150,150,150)
+local extreme_potato_mode = false
+local current_skybox = "None"
+
+-- Skybox snapshot/restore
+local skybox_snapshot = nil
+local skybox_we_created = false
+local function snapshot_sky()
+    local sky = Lighting:FindFirstChildOfClass("Sky")
+    if sky then
+        local props = {}
+        for _, k in ipairs({"SkyboxLf","SkyboxBk","SkyboxDn","SkyboxFt","SkyboxRt","SkyboxUp"}) do
+            props[k] = sky[k]
+        end
+        skybox_snapshot = { existed = true, props = props, ref = sky }
+    else
+        skybox_snapshot = { existed = false, props = nil, ref = nil }
+    end
+    skybox_we_created = false
+end
+local function restore_sky()
+    if not skybox_snapshot then return end
+    if skybox_snapshot.existed and skybox_snapshot.ref and skybox_snapshot.ref.Parent then
+        local sky = skybox_snapshot.ref
+        for k, v in pairs(skybox_snapshot.props) do pcall(function() sky[k] = v end) end
+    elseif skybox_we_created then
+        local sky = Lighting:FindFirstChildOfClass("Sky")
+        if sky and skybox_snapshot.ref == sky then pcall(function() sky:Destroy() end) end
+    end
+    skybox_snapshot = nil
+    skybox_we_created = false
+end
+
+local SkyBoxes = {
+    ["Default"]      = { SkyboxLf="rbxassetid://148943339", SkyboxBk="rbxassetid://148943390", SkyboxDn="rbxassetid://148943362", SkyboxFt="rbxassetid://148943404", SkyboxRt="rbxassetid://148943379", SkyboxUp="rbxassetid://148943410" },
+    ["Nebula"]       = { SkyboxLf="rbxassetid://159454286", SkyboxBk="rbxassetid://159454299", SkyboxDn="rbxassetid://159454296", SkyboxFt="rbxassetid://159454293", SkyboxRt="rbxassetid://159454300", SkyboxUp="rbxassetid://159454288" },
+    ["Blue Nebula"]  = { SkyboxBk="rbxassetid://79187608916257", SkyboxDn="rbxassetid://79187608916257", SkyboxFt="rbxassetid://135345543970829", SkyboxLf="rbxassetid://130684897818024", SkyboxRt="rbxassetid://134117814265945", SkyboxUp="rbxassetid://128019898265074" },
+    ["Setting Hills"]= { SkyboxLf="rbxassetid://264909758", SkyboxBk="rbxassetid://264908339", SkyboxDn="rbxassetid://264907909", SkyboxFt="rbxassetid://264909420", SkyboxRt="rbxassetid://264908886", SkyboxUp="rbxassetid://264907379" },
+    ["Blue Aurora"]  = { SkyboxBk="rbxassetid://12064107", SkyboxDn="rbxassetid://12064152", SkyboxFt="rbxassetid://12064121", SkyboxLf="rbxassetid://12063984", SkyboxRt="rbxassetid://12064115", SkyboxUp="rbxassetid://12064131" },
+    ["Red Aurora"]   = { SkyboxBk="rbxassetid://401664839", SkyboxDn="rbxassetid://401664862", SkyboxFt="rbxassetid://401664960", SkyboxLf="rbxassetid://401664881", SkyboxRt="rbxassetid://401664901", SkyboxUp="rbxassetid://401664936" },
+    ["Pink Vision"]  = { SkyboxBk="rbxassetid://6593929026", SkyboxDn="rbxassetid://6593930140", SkyboxFt="rbxassetid://6593931249", SkyboxLf="rbxassetid://6593932587", SkyboxRt="rbxassetid://6593933789", SkyboxUp="rbxassetid://6593935319" },
+    ["Twilight"]     = { SkyboxBk="rbxassetid://570557514", SkyboxDn="rbxassetid://570557775", SkyboxFt="rbxassetid://570557559", SkyboxLf="rbxassetid://570557620", SkyboxRt="rbxassetid://570557672", SkyboxUp="rbxassetid://570557727" },
+    ["Distopia"]     = { SkyboxBk="rbxassetid://2240134413", SkyboxDn="rbxassetid://2240136039", SkyboxFt="rbxassetid://2240130790", SkyboxLf="rbxassetid://2240133550", SkyboxRt="rbxassetid://2240132643", SkyboxUp="rbxassetid://2240135222" },
+    ["Peaceful"]     = { SkyboxBk="rbxassetid://73252679982122", SkyboxDn="rbxassetid://101074061181553", SkyboxFt="rbxassetid://112572775732134", SkyboxLf="rbxassetid://126931573973019", SkyboxRt="rbxassetid://135908172504233", SkyboxUp="rbxassetid://124514468649717" },
+}
+local function applySkybox(name)
+    local assets = SkyBoxes[name]; if not assets then return end
+    if not skybox_snapshot then snapshot_sky() end
+    local sky = Lighting:FindFirstChildOfClass("Sky")
+    if not sky then sky = Instance.new("Sky"); sky.Parent = Lighting; skybox_we_created = true; skybox_snapshot.ref = sky end
+    for prop, id in next, assets do pcall(function() sky[prop] = id end) end
+end
+
+-- Potato Mode snapshot/restore
+local potato_snapshot = nil
+local function potato_apply_one(obj)
+    if obj:IsA("BasePart") and not (obj.Parent and obj.Parent:FindFirstChild("Humanoid")) then
+        if not potato_snapshot.parts[obj] then
+            potato_snapshot.parts[obj] = { material = obj.Material, reflectance = obj.Reflectance, castshadow = obj.CastShadow }
+        end
+        obj.Material = Enum.Material.SmoothPlastic; obj.Reflectance = 0; obj.CastShadow = false
+    elseif obj:IsA("Decal") or obj:IsA("Texture") then
+        if potato_snapshot.decals[obj] == nil then potato_snapshot.decals[obj] = obj.Transparency end
+        obj.Transparency = 1
+    end
+end
+local function potato_restore()
+    if not potato_snapshot then return end
+    pcall(function()
+        if potato_snapshot.terrain then
+            workspace.Terrain.Decoration = potato_snapshot.terrain.decoration
+            workspace.Terrain.WaterWaveSize = potato_snapshot.terrain.waterwavesize
+            workspace.Terrain.WaterWaveSpeed = potato_snapshot.terrain.waterwavespeed
+            workspace.Terrain.WaterReflectance = potato_snapshot.terrain.waterreflectance
+            workspace.Terrain.WaterTransparency = potato_snapshot.terrain.watertransparency
+        end
+        Lighting.GlobalShadows = potato_snapshot.globalshadows
+        Lighting.FogEnd = potato_snapshot.fogend
+        for child, en in pairs(potato_snapshot.lighting_children) do
+            if child and child.Parent then pcall(function() child.Enabled = en end) end
+        end
+    end)
+    for inst, snap in pairs(potato_snapshot.parts) do
+        if inst and inst.Parent then
+            pcall(function() inst.Material = snap.material; inst.Reflectance = snap.reflectance; inst.CastShadow = snap.castshadow end)
+        end
+    end
+    for inst, tr in pairs(potato_snapshot.decals) do
+        if inst and inst.Parent then pcall(function() inst.Transparency = tr end) end
+    end
+    potato_snapshot = nil
+end
+
+-- Potato mode auto-apply on new descendants (file scope so it works regardless of which tab toggled it)
+cheat.utility.track_conn(Workspace.DescendantAdded:Connect(function(obj)
+    if not extreme_potato_mode then return end
+    if potato_snapshot then
+        potato_apply_one(obj)
+    else
+        if obj:IsA("BasePart") and not (obj.Parent and obj.Parent:FindFirstChild("Humanoid")) then
+            obj.Material = Enum.Material.SmoothPlastic; obj.Reflectance = 0; obj.CastShadow = false
+        elseif obj:IsA("Decal") or obj:IsA("Texture") then
+            obj.Transparency = 1
+        end
+    end
+end))
+
+-- Heartbeat for skybox/ambient/time (file scope; uses file-scoped state vars)
+local _last_skybox = nil
+local _lg_amb, _lg_outamb, _lg_time
+cheat.utility.new_heartbeat(function()
+    local _sky = current_skybox
+    if _sky and _sky ~= "None" and _sky ~= _last_skybox then _last_skybox = _sky; applySkybox(_sky) end
+    if world_globals_ex.gradientenabled then
+        if grad_col1 ~= _lg_amb then _lg_amb = grad_col1; Lighting.Ambient = grad_col1 end
+        if grad_col2 ~= _lg_outamb then _lg_outamb = grad_col2; Lighting.OutdoorAmbient = grad_col2 end
+    end
+    if world_globals_ex.EnableTime then
+        if world_globals_ex.Time ~= _lg_time then _lg_time = world_globals_ex.Time; Lighting.ClockTime = world_globals_ex.Time end
+    end
+end)
+
+-- Lighting restore exposed for cheat.unload()
+cheat._lighting_restore = function()
+    if potato_snapshot then potato_restore() end
+    if lighting_snapshot then
+        pcall(function()
+            Lighting.ClockTime = lighting_snapshot.clock
+            Lighting.Ambient = lighting_snapshot.ambient
+            Lighting.OutdoorAmbient = lighting_snapshot.outdoor
+        end)
+        lighting_snapshot = nil
+    end
+    restore_sky()
+end
+
+-- FIX #22: World & Lighting toggles moved to the World tab (BLOCK 24). Only the shared
+-- heartbeat loops stay in file scope here — they read `world_globals.*` flags that the
+-- World tab toggles write, so the two stay in sync automatically without UI duplication.
 
 cheat.utility.new_heartbeat(function()
     if world_globals.fullbright then
@@ -2491,14 +2726,12 @@ cheat.utility.new_heartbeat(function()
         Lighting.OutdoorAmbient = Color3.fromRGB(255,255,255)
         Lighting.Ambient = Color3.fromRGB(255,255,255)
     end
-    -- No Fog теперь event-driven через toggle callback (см. выше) — heartbeat не нужен
     if world_globals.noshadows then
         if Lighting.GlobalShadows then Lighting.GlobalShadows = false end
     end
 end)
 
--- FIX #5: NoLeafs event-driven (не каждый heartbeat)
-local _leafs_loop_active = false
+-- NoLeafs event-driven loop (file scope; reads world_globals.noleafs set by World tab toggle)
 cheat.utility.new_heartbeat(function()
     if not world_globals.noleafs then return end
     if _leafs_loop_active then return end
@@ -2508,8 +2741,10 @@ cheat.utility.new_heartbeat(function()
             local zones = Workspace:FindFirstChild("SpawnerZones")
             local foliage = zones and zones:FindFirstChild("Foliage")
             if foliage then
+                _leafs_original = _leafs_original or {}
                 for _, f in pairs(foliage:GetDescendants()) do
                     if f:FindFirstChildOfClass("SurfaceAppearance") and f.Transparency ~= 1 then
+                        if _leafs_original[f] == nil then _leafs_original[f] = f.Transparency end
                         f.Transparency = 1
                     end
                 end
@@ -2646,19 +2881,29 @@ zoomToggle:AddKeyPicker("zoom_key", { Default = "None", Text = "Zoom Keybind", M
 CameraGroup:AddSlider("cam_zoom_size", { Text = "Zoom Size", Min = 1, Max = 90, Rounding = 0, Default = 10, Callback = function(v) cam_zoom_size = v end })
 CameraGroup:AddToggle("cam_noscreen", { Text = "No Screen Effects", Default = false, Callback = function(v) no_screen_fx = v end })
 
--- FIX: zoom читает zoomToggle.Value напрямую — без зависимости от callback'ов keypicker'а
-local _zoom_default_fov = Camera.FieldOfView
+-- FIX #8: previously snapshotted Camera.FieldOfView once and force-restored the stale
+-- value every frame, clobbering the game's own FOV changes (sprint, ADS, etc.).
+-- Now: only write FOV when zoom OR cam_fov is active. Otherwise hand control back to the game.
+local _last_external_fov = Camera.FieldOfView
+local _external_was_active = false
 cheat.utility.new_renderstepped(function()
     local target_fov = nil
     if zoomToggle.Value then
         target_fov = cam_zoom_size
     elseif cam_fov_enabled then
         target_fov = cam_fov_size
-    else
-        target_fov = _zoom_default_fov
     end
-    if target_fov and Camera.FieldOfView ~= target_fov then
-        Camera.FieldOfView = target_fov
+    if target_fov then
+        if not _external_was_active then
+            _last_external_fov = Camera.FieldOfView
+            _external_was_active = true
+        end
+        if Camera.FieldOfView ~= target_fov then
+            Camera.FieldOfView = target_fov
+        end
+    else
+        _external_was_active = false
+        -- game owns FOV now
     end
 end)
 
@@ -3469,7 +3714,7 @@ cheat.clipActive = nc_clipActive
         if now - nc_last_probe >= NC_PROBE_WAIT then
             nc_last_probe = now
             local ok, plan, err = pcall(nc_probe, char, hrp, hum)
-            nc_plan, nc_plan_err = ok and plan or nil, ok and err or "probe failed"
+            nc_plan, nc_plan_err = (ok and plan or nil), (not ok and (err or "probe failed")) or nil
         end
         if nc_cooling then
             if nc_plan then
@@ -3526,14 +3771,10 @@ cheat.dressSkin = function(model, item_name, selected_skin)
     local textures = skin:FindFirstChild("Textures")
     local materials = skin:FindFirstChild("Materials")
     if not textures and not materials then return end
-    local parts = {}
-    for _, child in model:GetChildren() do
-        table.insert(parts, child)
-        for _, nested in child:GetChildren() do
-            table.insert(parts, nested)
-        end
-    end
-    for _, part in parts do
+    -- FIX: use GetDescendants instead of manual 2-level walk so deep attachment hierarchies
+    -- (e.g. AKMN receiver → barrel weld → front sight → gas block) all get skinned.
+    -- Was: model:GetChildren() + child:GetChildren() (only 2 levels deep, missed nested parts).
+    for _, part in model:GetDescendants() do
         if part:IsA("BasePart") then
             local key = part:GetAttribute("Skinnable")
             local texture = key and textures and textures:FindFirstChild(key)
@@ -3565,6 +3806,286 @@ cheat.dressSkin = function(model, item_name, selected_skin)
             end
         end
     end
+end
+
+-- FIX: apply dressSkin to ALL Model instances inside parent (not just the first).
+-- Composite weapons (AKMN/M4/FAL) live in Camera as multiple sibling Models —
+-- receiver, stock, front, handle, magazine — each a separate Model with its own
+-- item_id (e.g. "StockAKMN", "FrontAKMN", "762x39MAG"). The skin textures for
+-- each attachment live in Skins/<attachment_item_id>/<skin>/Textures — NOT in
+-- Skins/<weapon_item_id>/<skin>/Textures. So for each Model in Camera we must:
+--   1) detect its real item_id (via child Item ObjectValue, attributes, or Model.Name)
+--   2) apply dressSkin(model, attachment_item_id, skin) — that's where the Textures live
+--   3) also try dressSkin(model, parent_weapon_item_id, skin) as fallback — some
+--      attachments' BaseParts use Skinnable keys defined in the parent weapon's skin
+
+-- Detect the ItemsList item_id for a Model in Camera/Tool.
+-- Tries: child "Item" (ObjectValue.Value.Name or StringValue.Value), common
+-- attributes, then Model.Name (if it matches an ItemsList entry, attachments
+-- often do — e.g. "StockAKMN", "FrontAKMN", "762x39MAG").
+local function get_model_item_id(model)
+    if not model or not model:IsA("Model") then return nil end
+    -- 1. child "Item" (ObjectValue pointing at ItemsList entry, or StringValue)
+    local it = model:FindFirstChild("Item")
+    if it then
+        if it:IsA("ObjectValue") and it.Value then
+            local v = it.Value
+            -- SpecialSkinItem attribute overrides the ref name (mirrors skin_key_of)
+            local props = v:FindFirstChild("ItemProperties")
+            local special = props and props:GetAttribute("SpecialSkinItem")
+            if type(special) == "string" and special ~= "" then return special end
+            return v.Name
+        end
+        if it:IsA("StringValue") and it.Value ~= "" then return it.Value end
+        if it:IsA("StringValue") and it.Name ~= "Item" then return it.Name end
+        -- "Item" child whose own Name matches an ItemsList entry (e.g. vm.Item.Name == "AKMN")
+        local list = items_list_skins()
+        if list and list:FindFirstChild(it.Name) then return it.Name end
+    end
+    -- 2. attributes
+    for _, attr_name in ipairs({"ItemName", "ItemId", "SkinItem", "SpecialSkinItem"}) do
+        local attr = model:GetAttribute(attr_name)
+        if type(attr) == "string" and attr ~= "" then return attr end
+    end
+    -- 3. Model.Name itself — attachments in Project Delta are usually named exactly like
+    --    their ItemsList entry (StockAKMN, FrontAKMN, HandleAKMN, 762x39MAG, etc.)
+    local list = items_list_skins()
+    if list and list:FindFirstChild(model.Name) then return model.Name end
+    -- Last resort: Model.Name (dressSkin will no-op if no matching skin folder exists)
+    return model.Name
+end
+
+-- Iterates parent's direct Model children, detects each one's item_id, calls dressSkin
+-- with the detected item_id (and weapon_item as fallback). Works for the case where
+-- attachments are sibling Models of vm in Camera.
+local function dressSkin_all_models(parent, weapon_item, skin)
+    if not parent then return end
+    for _, m in ipairs(parent:GetChildren()) do
+        if m:IsA("Model") then
+            -- Detect this Model's actual item_id — attachments have their own.
+            local part_item = get_model_item_id(m) or weapon_item
+            -- 1. Apply with the attachment's own item_id (skins live in Skins/<attachment_id>/<skin>/).
+            pcall(cheat.dressSkin, m, part_item, skin)
+            -- 2. Also try with the parent weapon's item_id (in case attachment BaseParts
+            --    reuse Skinnable keys defined in the parent weapon's Textures).
+            if part_item ~= weapon_item then
+                pcall(cheat.dressSkin, m, weapon_item, skin)
+            end
+        end
+    end
+end
+
+-- FIX (dj regression "скин с ручки/ствола/приклада/магазина пропадает после holster"):
+-- Project Delta's vm contains BaseParts from MULTIPLE item_ids (receiver + each
+-- attachment). dressSkin_all_models above only catches attachment Models that are
+-- SIBLINGS of vm in Camera — but on re-equip they may be nested INSIDE vm, or the
+-- async loading may not have them as Models at the moment we fire. This function
+-- takes a different approach: walk ALL BaseParts in parent's descendants, collect
+-- unique Skinnable keys, then for each key find which item folder in Skins/ has
+-- Textures/<key> for the chosen skin, and call dressSkin(parent, item_folder, skin).
+-- dressSkin itself uses parent:GetDescendants() so one call per item_id covers all
+-- matching BaseParts regardless of nesting. Works whether attachments are nested,
+-- siblings, or async-loaded after vm.
+--
+-- FIX (dj regression "скин накладывается криво и на руки"):
+-- dressSkin_recursive used to call dressSkin(PARENT, item_folder, skin) on the WHOLE
+-- parent (Camera or Character). Because parent contains MANY Models (weapon + gloves +
+-- shirt + pants + ...), and they all have BaseParts tagged with Skinnable="Base",
+-- dressSkin iterated ALL of them and applied the matching Textures/Base to whatever
+-- BasePart had that key. Result: gloves/shirt/pants got AKMN's skin texture, and if
+-- multiple Skins/*/<skin>/Textures had a "Base" key, the LAST one to be processed
+-- overwrote earlier ones — receiver could end up with CombatGloves' texture.
+--
+-- Fix: scope the dressSkin call to the SPECIFIC Model that owns the matched Skinnable
+-- key, not the entire parent. We track (model → set of keys present) by walking
+-- descendants with an ancestor check. Then for each item_folder in Skins/ we find
+-- which Models have keys that match it, and call dressSkin(model, item_folder, skin)
+-- on JUST those Models. dressSkin iterates that Model's descendants and only touches
+-- BaseParts inside it — so gloves/shirt/pants stay untouched.
+local function dressSkin_recursive(parent, weapon_item, skin)
+    if not parent then return end
+
+    -- Pass 1: collect (BasePart → its owning Model). Walk descendants; for each
+    -- BasePart with a Skinnable attribute, find the nearest Model ancestor that is
+    -- a direct child of parent. We bucket keys by that Model so we can scope calls.
+    local model_keys = {}        -- model → { [key] = true, ... }
+    local key_to_models = {}     -- key → { [model] = true, ... }
+    for _, p in parent:GetDescendants() do
+        if p:IsA("BasePart") then
+            local k = p:GetAttribute("Skinnable")
+            if k then
+                -- Find the owning Model: walk up parents until we hit a child of `parent`.
+                local owner = nil
+                local cur = p.Parent
+                while cur and cur ~= parent do
+                    if cur:IsA("Model") then owner = cur end
+                    cur = cur.Parent
+                end
+                -- If no Model ancestor found, treat the BasePart itself as its own bucket
+                -- (dressSkin can be called with a BasePart instead of a Model — it just
+                -- iterates descendants, which for a BasePart is empty, then the part itself
+                -- is processed in the for loop, since GetDescendants skips the part).
+                -- To support this case we wrap the BasePart in a fake "owner" sentinel.
+                local bucket = owner or p
+                if not model_keys[bucket] then model_keys[bucket] = {} end
+                model_keys[bucket][k] = true
+                if not key_to_models[k] then key_to_models[k] = {} end
+                key_to_models[k][bucket] = true
+            end
+        end
+    end
+    if next(model_keys) == nil then return end  -- no Skinnable parts at all
+
+    local f = skins_folder()
+    if not f then return end
+
+    -- Pass 2: for each item_folder in Skins/, find which Models own keys that match
+    -- Textures/<key> or Materials/<key>. Build (model → list of matching item_folder_names).
+    -- We collect ALL matches per model (not just first), so Pass 3 can pick weapon_item
+    -- first when it's available for a given model (avoids CombatGloves' Textures/Base
+    -- winning over AKMN's Textures/Base for the AKMN receiver model).
+    local model_to_items = {}  -- model → array of item_folder_names (insertion order = Skins/ iter order)
+    for _, item_folder in f:GetChildren() do
+        local name = item_folder.Name
+        local skin_folder = item_folder:FindFirstChild(skin)
+        if skin_folder then
+            local tx = skin_folder:FindFirstChild("Textures")
+            local mt = skin_folder:FindFirstChild("Materials")
+            local matched_keys = {}
+            if tx then
+                for key in pairs(key_to_models) do
+                    if tx:FindFirstChild(key) then matched_keys[key] = true end
+                end
+            end
+            if mt then
+                for key in pairs(key_to_models) do
+                    if mt:FindFirstChild(key) then matched_keys[key] = true end
+                end
+            end
+            if next(matched_keys) ~= nil then
+                -- For every Model that owns any matched key, append this item_folder name.
+                for key in pairs(matched_keys) do
+                    for model in pairs(key_to_models[key]) do
+                        if not model_to_items[model] then model_to_items[model] = {} end
+                        -- Avoid duplicates if multiple keys from same item_folder match the same model.
+                        local list = model_to_items[model]
+                        local already = false
+                        for _, n in ipairs(list) do if n == name then already = true break end end
+                        if not already then list[#list + 1] = name end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Pass 3: call dressSkin(model, item_folder, skin) for each (model, items) pair.
+    -- Priority (highest first):
+    --   1. model_id (model's own detected item_id — covers CombatGloves Model getting
+    --      CombatGloves skin, AKMN Model getting AKMN skin, StockAKMN Model getting
+    --      StockAKMN skin if it has one for this skin name).
+    --   2. weapon_item (parent weapon fallback) — ONLY if the Model has no own item
+    --      folder in Skins/ at all. This covers nested attachment Models in vm whose
+    --      own skin folder doesn't exist (e.g. StockAKMN if Skins/StockAKMN/ doesn't
+    --      exist but AKMN/Zenith/Textures/Stock does). For Models that DO have their
+    --      own item folder (CombatGloves, WastelandShirt, etc.), if their own skin
+    --      doesn't exist for this skin name, we SKIP them entirely — don't pollute
+    --      them with weapon's skin.
+    --   3. First match (last resort — should rarely happen).
+    -- This fixes two regressions:
+    --   a) CombatGloves Model was getting AKMN's Textures/Base because weapon_item
+    --      was incorrectly preferred over model's own item_id.
+    --   b) Receiver was getting CombatGloves' Textures/Base because first-match
+    --      won when weapon_item wasn't in items list.
+    local f2 = skins_folder()
+    for model, items in pairs(model_to_items) do
+        local chosen = nil
+        -- 1. Try model_id (own item folder with this skin)
+        local model_id = get_model_item_id(model)
+        if model_id then
+            for _, n in ipairs(items) do
+                if n == model_id then chosen = n break end
+            end
+        end
+        -- 2. Try weapon_item ONLY if Model has no own item folder in Skins/ at all.
+        --    This is the key gate: CombatGloves has its own Skins/CombatGloves/ folder,
+        --    so even if CombatGloves/Zenith doesn't exist, we DON'T fall back to AKMN.
+        --    Only Models without any own skin folder (e.g. nested attachment Models in
+        --    vm whose name isn't an ItemsList entry) get the weapon_item fallback.
+        if not chosen and model_id and f2 then
+            local has_own_folder = f2:FindFirstChild(model_id) ~= nil
+            if not has_own_folder then
+                for _, n in ipairs(items) do
+                    if n == weapon_item then chosen = n break end
+                end
+            end
+        end
+        -- 3. First match (rare fallback — covers vm receiver Models that have no
+        --    detectable item_id and no own folder; their items list will typically
+        --    only contain weapon_item anyway)
+        if not chosen then
+            chosen = items[1]
+        end
+        pcall(cheat.dressSkin, model, chosen, skin)
+    end
+end
+
+-- DEBUG (dj skinchanger investigation): one-shot dump of Camera's children + the
+-- Skinnable keys present on each Model's BaseParts + whether the selected skin
+-- has matching Textures/Materials. Triggers only when skin_last_vm changes.
+-- Read the console output and send it back so we can wire the correct item_ids.
+local skin_debug_dumped_vm = nil
+local function skin_debug_dump(parent, weapon_item, skin)
+    if skin_debug_dumped_vm == parent then return end  -- once per parent change
+    skin_debug_dumped_vm = parent
+    print("────────── [ZALUPA SKIN DEBUG] ──────────")
+    print("weapon_item = " .. tostring(weapon_item) .. "  skin = " .. tostring(skin))
+    if not parent then print("parent is nil"); print("────────────────────────────────────────"); return end
+    local children = parent:GetChildren()
+    print("parent: " .. tostring(parent:GetFullName()) .. "  (" .. #children .. " children)")
+    local f = skins_folder()
+    local list = items_list_skins()
+    for i, m in ipairs(children) do
+        if m:IsA("Model") then
+            local part_item = get_model_item_id(m)
+            print(string.format("  [%d] Model %q  detected_item_id=%q", i, m.Name, tostring(part_item)))
+            -- Collect Skinnable keys on this Model's BaseParts
+            local keys = {}
+            for _, p in m:GetDescendants() do
+                if p:IsA("BasePart") then
+                    local k = p:GetAttribute("Skinnable")
+                    if k and not keys[k] then keys[k] = (p.Name or "?") end
+                end
+            end
+            local key_str = {}
+            for k, n in pairs(keys) do table.insert(key_str, k .. "→" .. n) end
+            print("       Skinnable keys: " .. (#key_str > 0 and table.concat(key_str, ", ") or "(none)"))
+            -- Look up the skin folder for the detected item_id and print its Textures/Materials
+            if part_item and f then
+                local skin_folder = f:FindFirstChild(part_item)
+                local skn = skin_folder and skin_folder:FindFirstChild(skin)
+                if skn then
+                    local tx = skn:FindFirstChild("Textures")
+                    local mt = skn:FindFirstChild("Materials")
+                    local tx_names = {}
+                    if tx then for _, t in tx:GetChildren() do table.insert(tx_names, t.Name) end end
+                    local mt_names = {}
+                    if mt then for _, t in mt:GetChildren() do table.insert(mt_names, t.Name) end end
+                    print("       Skins/" .. part_item .. "/" .. skin .. "/Textures: " .. (#tx_names > 0 and table.concat(tx_names, ", ") or "(none)"))
+                    print("       Skins/" .. part_item .. "/" .. skin .. "/Materials: " .. (#mt_names > 0 and table.concat(mt_names, ", ") or "(none)"))
+                else
+                    print("       Skins/" .. part_item .. "/" .. tostring(skin) .. " : NOT FOUND")
+                    if skin_folder then
+                        local avail = {}
+                        for _, s in skin_folder:GetChildren() do table.insert(avail, s.Name) end
+                        print("         available skins: " .. (#avail > 0 and table.concat(avail, ", ") or "(none)"))
+                    else
+                        print("         no Skins/" .. part_item .. " folder at all")
+                    end
+                end
+            end
+        end
+    end
+    print("────────────────────────────────────────")
 end
 
 -- Filter: RangedWeapon + Melee/knife. ItemType может быть "Melee" ИЛИ "MeleeWeapon".
@@ -3682,11 +4203,19 @@ local function skin_apply(item, skin)
     for _, obj in skin_owned(item) do
         if skin_stamp(obj, item, skin) then n = n + 1 end
     end
-    local vm = Camera and Camera:FindFirstChildOfClass("Model")
-    if vm then cheat.dressSkin(vm, item, skin) end
+    -- FIX: dressSkin_recursive walks ALL BaseParts in Camera (or Tool) descendants,
+    -- collects their Skinnable keys, then for each key finds the matching item folder
+    -- in Skins/ and applies dressSkin. Covers receiver + all attachment parts whether
+    -- they're in sibling Models, nested inside vm, or async-loaded after equip.
+    dressSkin_recursive(Camera, item, skin)
     local char = LocalPlayer.Character
-    local tool = char and char:FindFirstChildOfClass("Tool")
-    if tool then cheat.dressSkin(tool, item, skin) end
+    if char then
+        -- Tool in Character (third-person vm). Same recursive treatment.
+        local tool = char:FindFirstChildOfClass("Tool")
+        if tool then
+            dressSkin_recursive(tool, item, skin)
+        end
+    end
     return n
 end
 
@@ -4095,6 +4624,10 @@ make_skin_button("Apply Skin", Color3.fromRGB(60, 140, 80)).MouseButton1Click:Co
     skin_choices[skin_selected_weapon] = skin_selected_skin
     local n = skin_apply(skin_selected_weapon, skin_selected_skin)
     Library:Notify({Title = "Skins", Description = "Skin set on " .. n .. " item(s): " .. skin_selected_weapon, Time = 3})
+    -- DEBUG: force re-dump on next Apply click so dj can capture the structure
+    skin_debug_dumped_vm = nil
+    pcall(skin_debug_dump, Camera, skin_selected_weapon, skin_selected_skin)
+    pcall(skin_debug_dump, LocalPlayer.Character, skin_selected_weapon, skin_selected_skin)
 end)
 
 make_skin_button("Remove Skin", Color3.fromRGB(140, 60, 60)).MouseButton1Click:Connect(function()
@@ -4149,16 +4682,84 @@ SkinOpenGroup:AddToggle("SkinAuto", {
 })
 
 -- Auto-apply: dress viewmodel when it changes + periodic re-stamp owned items
+-- Ported from swimhub: must try both vm.Item.Name AND vm.Name as the lookup key —
+-- Project Delta's vm structure varies (some vms have an Item child whose Name is the
+-- weapon id; some don't, and the vm's own Name is the weapon id). Without the fallback
+-- auto-apply silently no-ops on vms that lack a matching Item child.
+-- FIX: dress ALL Models in Camera so composite weapons (AKMN/M4/FAL with separate
+-- stock/front/handle/magazine Models) get skinned on every part, not just the receiver.
+--
+-- FIX (dj regression "skin пропадает после убирания/доставания"):
+-- Project Delta spawns the vm Model first, then loads Stock/Front/Handle/Magazine
+-- Models into Camera asynchronously over the next few frames. Our old cache checked
+-- only `vm ~= skin_last_vm` — when the vm instance stayed the same but new attachment
+-- Models appeared, we skipped re-applying. Result: receiver skinned, attachments bare.
+-- Fix: track a fingerprint of Camera's Model child names. When it changes (new Models
+-- loaded, or vm despawned for re-equip), re-run dressSkin_all_models. dressSkin is
+-- idempotent (destroys old SurfaceAppearance + re-clones), so re-applying on already-
+-- skinned parts during the brief loading window is safe.
+--
+-- FIX (dj regression "скин с ручки/ствола/приклада/магазина пропадает после holster"):
+-- The weapon Model lives in BOTH Camera (first-person vm) AND Character (world model,
+-- visible in third-person and to other players). Dump showed Character.sheltercheek.AKMN
+-- has its own Skinnable BaseParts (FrontMeshPart2). Our heartbeat only dressed Camera,
+-- so Character's weapon Model never got re-skinned after holster/equip. Now we dress
+-- BOTH Camera and Character on every fingerprint change.
 local skin_last_vm = nil
+local skin_last_fingerprint = ""
 cheat.utility.new_heartbeat(function()
     if not skin_auto_apply then return end
     local vm = Camera and Camera:FindFirstChildOfClass("Model")
-    if vm and vm ~= skin_last_vm then
-        skin_last_vm = vm
+    local char = LocalPlayer.Character
+
+    -- Determine weapon item_id: try vm.Item.Name, vm.Name, then scan Character for
+    -- a Model whose Name matches a skin_choice entry (covers third-person case where
+    -- vm doesn't exist but Character has the weapon Model directly).
+    local name = nil
+    if vm then
         local it = vm:FindFirstChild("Item")
-        local name = it and it.Name
-        if name and skin_choices[name] then
-            pcall(cheat.dressSkin, vm, name, skin_choices[name])
+        name = (it and skin_choices[it.Name] and it.Name) or (skin_choices[vm.Name] and vm.Name)
+    end
+    if not name and char then
+        for _, m in ipairs(char:GetChildren()) do
+            if m:IsA("Model") and skin_choices[m.Name] then
+                name = m.Name
+                break
+            end
+        end
+    end
+
+    -- No weapon equipped at all (no vm, no Character weapon Model) — reset cache.
+    if not vm and not name then
+        if skin_last_vm then
+            skin_last_vm = nil
+            skin_last_fingerprint = ""
+        end
+        return
+    end
+
+    -- Build fingerprint: vm identity + sorted Camera Model names + Character weapon Model name.
+    -- Catches: vm replacement, async attachment loading, holster/equip cycle on Character.
+    local cam_names = {}
+    if Camera then
+        for _, m in ipairs(Camera:GetChildren()) do
+            if m:IsA("Model") then table.insert(cam_names, m.Name) end
+        end
+    end
+    table.sort(cam_names)
+    local char_weapon = (char and name) or ""
+    local fp = tostring(vm) .. "|" .. table.concat(cam_names, ",") .. "|" .. char_weapon
+    if fp == skin_last_fingerprint then return end
+    skin_last_fingerprint = fp
+    skin_last_vm = vm
+
+    if name then
+        -- Dress BOTH Camera (first-person vm) AND Character (world model visible to others).
+        -- dressSkin_recursive walks GetDescendants so it covers nested parts and sibling
+        -- Models in either container. dressSkin is idempotent so re-applying is safe.
+        dressSkin_recursive(Camera, name, skin_choices[name])
+        if char then
+            dressSkin_recursive(char, name, skin_choices[name])
         end
     end
 end)
@@ -5003,11 +5604,18 @@ task.spawn(function()
                     if no_melee_cooldown and self then
                         pcall(function()
                             self.useDebounce = false
+                            -- FIX #10: dead conditional — both branches returned "NormalAttack".
+                            -- Now uses AltAttack when the alt-attack animation track is loaded and altUseCounter is 1.
                             local attack_type = "NormalAttack"
                             if self.altUseCounter == 1 and self.clientAnimationTracks and self.clientAnimationTracks.UseAlt then
-                                attack_type = "NormalAttack"
+                                attack_type = "AltAttack"
                             end
-                            melee_module:StartSwing(self.weapon, self.worldModel, self.viewModel, attack_type, self.SprintStrafe)
+                            -- FIX #9: was melee_module:StartSwing(...) which passed melee_module as self.
+                            -- StartSwing expects the FPS weapon controller as self (the same `self` MeleeWeaponDefault receives).
+                            -- Use the dot form so we pass the controller explicitly.
+                            if melee_module.StartSwing then
+                                melee_module.StartSwing(self, self.weapon, self.worldModel, self.viewModel, attack_type, self.SprintStrafe)
+                            end
                         end)
                     end
                     return old(self, ...)
@@ -5300,12 +5908,13 @@ task.spawn(function()
             real_orig = silent_aim.manipulated_origin
         end
         local _fire_part = silent_aim.target_part
-        local _fire_pos  = _fire_part and _fire_part.Position or nil
-        local dist = _fire_pos and (_fire_pos - real_orig).Magnitude or 0
+        if not _fire_part or not _fire_part.Parent then return end  -- FIX #14: TOCTOU — target may have died between heartbeat check and fire
+        local _fire_pos  = _fire_part.Position
+        local dist = (_fire_pos - real_orig).Magnitude
         local autoshootdelay = tick() - (dist / 1000)
         local rnd = math.random(-10000, 10000)
         silent_aim._exact_fire_tick = tick()
-        local as_dir = _fire_pos and (_fire_pos - real_orig).Unit or Vector3.new(0,1,0)
+        local as_dir = (_fire_pos - real_orig).Unit
 
         local ok_inv, fire_ok = pcall(function() return FireProjectile:InvokeServer(as_dir, rnd, autoshootdelay) end)
         if ok_inv then
@@ -5321,7 +5930,7 @@ task.spawn(function()
                 if not (silent_aim.corner_shoot and silent_aim.manipulated_origin) then
                     t_orig = aimpart and aimpart.Position or Camera.CFrame.p
                 end
-                spawn_tracer(t_orig, _fire_pos or Vector3.zero, true)
+                spawn_tracer(t_orig, _fire_pos, true)
             end
             -- hit-effects (damage numbers / ghost / sound / sparkles) обрабатываются единым местом в __namecall FireProjectile,
             -- который срабатывает на InvokeServer ниже по стеку — здесь не дёргаем, иначе задвоение.
@@ -5855,7 +6464,7 @@ end)
         if info_visible then
             local mousepos = Vector2.new(_cmc.X, _cmc.Y + _cgi.Y)
             -- drag-and-drop
-            if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) and cheat.Library and cheat.Library.Opened then
+            if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) and Library and Library.Opened then
                 local in_header = mousepos.X >= tipanel.pos.X and mousepos.X <= tipanel.pos.X + tipanel.width
                     and mousepos.Y >= tipanel.pos.Y and mousepos.Y <= tipanel.pos.Y + 25
                 if in_header or tipanel.dragging then
@@ -6042,7 +6651,8 @@ end)
                     lines[i][3].Thickness = cursor.Thickness
                     lines[i][3].Visible = true
                 end
-                _rot = _rot + (cursor.Speed * delta * 1000)
+                -- FIX #20: bounded modulo (was: unbounded float growth → precision loss after long sessions)
+                _rot = (_rot + (cursor.Speed * delta * 1000)) % 360
             else
                 _rot = (_rot + (cursor.Speed * 10) * delta) % 90
                 dot.Visible = cursor.Dot
@@ -6093,211 +6703,12 @@ end)()
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- [BLOCK 19] LIGHTING EXTRAS (Time/Ambient/Skybox/Potato Mode, extends WorldGroup)
+-- [BLOCK 19] LIGHTING EXTRAS — DELETED. Merged into the World tab (BLOCK 24).
+-- All state (grad_col1/grad_col2, extreme_potato_mode, current_skybox, skybox_snapshot,
+-- potato_snapshot) and helpers (snapshot_sky, restore_sky, applySkybox, potato_apply_one,
+-- potato_restore, _lighting_restore) live in file scope near BLOCK 09b. The World tab
+-- now owns Time/Ambient/Skybox/Potato UI.
 -- ═══════════════════════════════════════════════════════════════════════════
-;(function()
-    local LightGroup = Tabs.Visuals:AddLeftGroupbox(L("grp_lighting_extras"))
-    -- world_globals_ex / lighting_snapshot / snapshot_lighting are file-scoped (declared in BLOCK 03)
-    -- so the World tab (BLOCK 24) can share the same state.
-    local grad_col1, grad_col2 = Color3.fromRGB(90,90,90), Color3.fromRGB(150,150,150)
-    local extreme_potato_mode = false
-    local current_skybox = "None"
-
-    -- FIX #6: skybox snapshot + restore на "None".
-    local skybox_snapshot = nil
-    local skybox_we_created = false
-    local function snapshot_sky()
-        local sky = Lighting:FindFirstChildOfClass("Sky")
-        if sky then
-            local props = {}
-            for _, k in ipairs({"SkyboxLf","SkyboxBk","SkyboxDn","SkyboxFt","SkyboxRt","SkyboxUp"}) do
-                props[k] = sky[k]
-            end
-            skybox_snapshot = { existed = true, props = props, ref = sky }
-        else
-            skybox_snapshot = { existed = false, props = nil, ref = nil }
-        end
-        skybox_we_created = false
-    end
-    local function restore_sky()
-        if not skybox_snapshot then return end
-        if skybox_snapshot.existed and skybox_snapshot.ref and skybox_snapshot.ref.Parent then
-            local sky = skybox_snapshot.ref
-            for k, v in pairs(skybox_snapshot.props) do pcall(function() sky[k] = v end) end
-        elseif skybox_we_created then
-            local sky = Lighting:FindFirstChildOfClass("Sky")
-            if sky and skybox_snapshot.ref == sky then pcall(function() sky:Destroy() end) end
-        end
-        skybox_snapshot = nil
-        skybox_we_created = false
-    end
-
-    local SkyBoxes = {
-        ["Default"]      = { SkyboxLf="rbxassetid://148943339", SkyboxBk="rbxassetid://148943390", SkyboxDn="rbxassetid://148943362", SkyboxFt="rbxassetid://148943404", SkyboxRt="rbxassetid://148943379", SkyboxUp="rbxassetid://148943410" },
-        ["Nebula"]       = { SkyboxLf="rbxassetid://159454286", SkyboxBk="rbxassetid://159454299", SkyboxDn="rbxassetid://159454296", SkyboxFt="rbxassetid://159454293", SkyboxRt="rbxassetid://159454300", SkyboxUp="rbxassetid://159454288" },
-        ["Blue Nebula"]  = { SkyboxBk="rbxassetid://79187608916257", SkyboxDn="rbxassetid://79187608916257", SkyboxFt="rbxassetid://135345543970829", SkyboxLf="rbxassetid://130684897818024", SkyboxRt="rbxassetid://134117814265945", SkyboxUp="rbxassetid://128019898265074" },
-        ["Setting Hills"]= { SkyboxLf="rbxassetid://264909758", SkyboxBk="rbxassetid://264908339", SkyboxDn="rbxassetid://264907909", SkyboxFt="rbxassetid://264909420", SkyboxRt="rbxassetid://264908886", SkyboxUp="rbxassetid://264907379" },
-        ["Blue Aurora"]  = { SkyboxBk="rbxassetid://12064107", SkyboxDn="rbxassetid://12064152", SkyboxFt="rbxassetid://12064121", SkyboxLf="rbxassetid://12063984", SkyboxRt="rbxassetid://12064115", SkyboxUp="rbxassetid://12064131" },
-        ["Red Aurora"]   = { SkyboxBk="rbxassetid://401664839", SkyboxDn="rbxassetid://401664862", SkyboxFt="rbxassetid://401664960", SkyboxLf="rbxassetid://401664881", SkyboxRt="rbxassetid://401664901", SkyboxUp="rbxassetid://401664936" },
-        ["Pink Vision"]  = { SkyboxBk="rbxassetid://6593929026", SkyboxDn="rbxassetid://6593930140", SkyboxFt="rbxassetid://6593931249", SkyboxLf="rbxassetid://6593932587", SkyboxRt="rbxassetid://6593933789", SkyboxUp="rbxassetid://6593935319" },
-        ["Twilight"]     = { SkyboxBk="rbxassetid://570557514", SkyboxDn="rbxassetid://570557775", SkyboxFt="rbxassetid://570557559", SkyboxLf="rbxassetid://570557620", SkyboxRt="rbxassetid://570557672", SkyboxUp="rbxassetid://570557727" },
-        ["Distopia"]     = { SkyboxBk="rbxassetid://2240134413", SkyboxDn="rbxassetid://2240136039", SkyboxFt="rbxassetid://2240130790", SkyboxLf="rbxassetid://2240133550", SkyboxRt="rbxassetid://2240132643", SkyboxUp="rbxassetid://2240135222" },
-        ["Peaceful"]     = { SkyboxBk="rbxassetid://73252679982122", SkyboxDn="rbxassetid://101074061181553", SkyboxFt="rbxassetid://112572775732134", SkyboxLf="rbxassetid://126931573973019", SkyboxRt="rbxassetid://135908172504233", SkyboxUp="rbxassetid://124514468649717" },
-    }
-    local function applySkybox(name)
-        local assets = SkyBoxes[name]; if not assets then return end
-        if not skybox_snapshot then snapshot_sky() end
-        local sky = Lighting:FindFirstChildOfClass("Sky")
-        if not sky then sky = Instance.new("Sky"); sky.Parent = Lighting; skybox_we_created = true; skybox_snapshot.ref = sky end
-        for prop, id in next, assets do pcall(function() sky[prop] = id end) end
-    end
-
-    local timeTog = LightGroup:AddToggle("w_timeon", { Text = "Time Changer", Default = false, Callback = function(v)
-        world_globals_ex.EnableTime = v
-        if v then
-            lighting_snapshot = lighting_snapshot or snapshot_lighting()
-        elseif lighting_snapshot then
-            Lighting.ClockTime = lighting_snapshot.clock
-        end
-    end })
-    LightGroup:AddSlider("w_time", { Text = "Time", Min = 0, Max = 240, Rounding = 0, Default = 120, Callback = function(v) world_globals_ex.Time = v / 10 end })
-
-    local ambTog = LightGroup:AddToggle("w_ambient", { Text = "Ambient Color", Default = false, Callback = function(v)
-        world_globals_ex.gradientenabled = v
-        if v then
-            lighting_snapshot = lighting_snapshot or snapshot_lighting()
-        elseif lighting_snapshot then
-            Lighting.Ambient = lighting_snapshot.ambient
-            Lighting.OutdoorAmbient = lighting_snapshot.outdoor
-        end
-    end })
-    ambTog:AddColorPicker("w_ambcol1", { Title = "Ambient Color", Default = Color3.new(1,1,1), Callback = function(v) grad_col1 = v; grad_col2 = v end })
-
-    LightGroup:AddDropdown("w_skybox", { Text = "Custom Skybox", Values = {"None","Default","Nebula","Blue Nebula","Setting Hills","Blue Aurora","Red Aurora","Pink Vision","Twilight","Distopia","Peaceful"}, Default = "None", Multi = false, Callback = function(v)
-        if v == "None" then
-            restore_sky()
-            current_skybox = "None"
-        else
-            current_skybox = v
-        end
-    end })
-
-    -- FIX #5: potato mode snapshot + restore на toggle-off (раньше мир оставался плоским навсегда).
-    local potato_snapshot = nil
-    local function potato_apply_one(obj)
-        if obj:IsA("BasePart") and not (obj.Parent and obj.Parent:FindFirstChild("Humanoid")) then
-            if not potato_snapshot.parts[obj] then
-                potato_snapshot.parts[obj] = { material = obj.Material, reflectance = obj.Reflectance, castshadow = obj.CastShadow }
-            end
-            obj.Material = Enum.Material.SmoothPlastic; obj.Reflectance = 0; obj.CastShadow = false
-        elseif obj:IsA("Decal") or obj:IsA("Texture") then
-            if potato_snapshot.decals[obj] == nil then potato_snapshot.decals[obj] = obj.Transparency end
-            obj.Transparency = 1
-        end
-    end
-    local function potato_restore()
-        if not potato_snapshot then return end
-        pcall(function()
-            if potato_snapshot.terrain then
-                workspace.Terrain.Decoration = potato_snapshot.terrain.decoration
-                workspace.Terrain.WaterWaveSize = potato_snapshot.terrain.waterwavesize
-                workspace.Terrain.WaterWaveSpeed = potato_snapshot.terrain.waterwavespeed
-                workspace.Terrain.WaterReflectance = potato_snapshot.terrain.waterreflectance
-                workspace.Terrain.WaterTransparency = potato_snapshot.terrain.watertransparency
-            end
-            Lighting.GlobalShadows = potato_snapshot.globalshadows
-            Lighting.FogEnd = potato_snapshot.fogend
-            for child, en in pairs(potato_snapshot.lighting_children) do
-                if child and child.Parent then pcall(function() child.Enabled = en end) end
-            end
-        end)
-        for inst, snap in pairs(potato_snapshot.parts) do
-            if inst and inst.Parent then
-                pcall(function() inst.Material = snap.material; inst.Reflectance = snap.reflectance; inst.CastShadow = snap.castshadow end)
-            end
-        end
-        for inst, tr in pairs(potato_snapshot.decals) do
-            if inst and inst.Parent then pcall(function() inst.Transparency = tr end) end
-        end
-        potato_snapshot = nil
-    end
-
-    LightGroup:AddToggle("w_potato", { Text = "Extreme Potato Mode", Default = false, Callback = function(v)
-        extreme_potato_mode = v
-        if v then
-            potato_snapshot = potato_snapshot or {
-                terrain = {
-                    decoration = workspace.Terrain.Decoration,
-                    waterwavesize = workspace.Terrain.WaterWaveSize,
-                    waterwavespeed = workspace.Terrain.WaterWaveSpeed,
-                    waterreflectance = workspace.Terrain.WaterReflectance,
-                    watertransparency = workspace.Terrain.WaterTransparency,
-                },
-                globalshadows = Lighting.GlobalShadows,
-                fogend = Lighting.FogEnd,
-                lighting_children = {},
-                parts = {},
-                decals = {},
-            }
-            pcall(function()
-                workspace.Terrain.Decoration = false
-                workspace.Terrain.WaterWaveSize = 0; workspace.Terrain.WaterWaveSpeed = 0
-                workspace.Terrain.WaterReflectance = 0; workspace.Terrain.WaterTransparency = 0
-                Lighting.GlobalShadows = false; Lighting.FogEnd = 9e9
-                for _, o in pairs(Lighting:GetChildren()) do
-                    if o:IsA("PostEffect") or o:IsA("Atmosphere") or o:IsA("Sky") or o:IsA("Clouds") then
-                        if potato_snapshot.lighting_children[o] == nil then potato_snapshot.lighting_children[o] = o.Enabled end
-                        o.Enabled = false
-                    end
-                end
-            end)
-            for _, obj in pairs(workspace:GetDescendants()) do potato_apply_one(obj) end
-        else
-            potato_restore()
-        end
-    end })
-
-    cheat.utility.track_conn(Workspace.DescendantAdded:Connect(function(obj)
-        if not extreme_potato_mode then return end
-        if potato_snapshot then
-            potato_apply_one(obj)
-        else
-            if obj:IsA("BasePart") and not (obj.Parent and obj.Parent:FindFirstChild("Humanoid")) then
-                obj.Material = Enum.Material.SmoothPlastic; obj.Reflectance = 0; obj.CastShadow = false
-            elseif obj:IsA("Decal") or obj:IsA("Texture") then
-                obj.Transparency = 1
-            end
-        end
-    end))
-
-    local _last_skybox = nil
-    local _lg_amb, _lg_outamb, _lg_time
-    cheat.utility.new_heartbeat(function()
-        local _sky = current_skybox
-        if _sky and _sky ~= "None" and _sky ~= _last_skybox then _last_skybox = _sky; applySkybox(_sky) end
-        if world_globals_ex.gradientenabled then
-            if grad_col1 ~= _lg_amb then _lg_amb = grad_col1; Lighting.Ambient = grad_col1 end
-            if grad_col2 ~= _lg_outamb then _lg_outamb = grad_col2; Lighting.OutdoorAmbient = grad_col2 end
-        end
-        if world_globals_ex.EnableTime then
-            if world_globals_ex.Time ~= _lg_time then _lg_time = world_globals_ex.Time; Lighting.ClockTime = world_globals_ex.Time end
-        end
-    end)
-
-    -- expose restore для cheat.unload()
-    cheat._lighting_restore = function()
-        if potato_snapshot then potato_restore() end
-        if lighting_snapshot then
-            pcall(function()
-                Lighting.ClockTime = lighting_snapshot.clock
-                Lighting.Ambient = lighting_snapshot.ambient
-                Lighting.OutdoorAmbient = lighting_snapshot.outdoor
-            end)
-            lighting_snapshot = nil
-        end
-        restore_sky()
-    end
-end)()
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- [BLOCK 20] OBJECTS ESP — Extractions + Car ESP (ported from tomboy.hook)
@@ -6620,8 +7031,11 @@ end)()
     fcTog:AddKeyPicker("fc_key", { Default = "F", Text = "Freecam Key", Mode = "Toggle", SyncToggleState = true })
     FreecamGroup:AddSlider("fc_speed", { Text = "Speed", Min = 10, Max = 575, Rounding = 0, Default = 50, Callback = function(v) freecam_speed = v end })
 
+    local fc_alive = true
+    cheat.utility.track_conn({ Disconnect = function() fc_alive = false; cheat.freecam_enabled = false end })
+
     task.spawn(function()
-        while task.wait(1/5) do
+        while fc_alive and task.wait(1/5) do
             local closest, distance = nil, math.huge
             if cheat.freecam_enabled and fc_pos then
                 for _, plr in ipairs(Players:GetPlayers()) do
@@ -6635,7 +7049,9 @@ end)()
                     end
                 end
             end
-            LocalPlayer.ReplicationFocus = closest
+            if cheat.freecam_enabled then
+                LocalPlayer.ReplicationFocus = closest
+            end
         end
     end)
 
@@ -6786,30 +7202,141 @@ end)()
 end)()
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- [BLOCK 24] WORLD TAB — mirrors of Visuals world toggles + lighting controls.
--- Shares the same file-scoped state (world_globals / world_globals_ex / lighting_snapshot)
--- as BLOCK 06 (Visuals WorldGroup) and BLOCK 19 (Lighting Extras). Both tabs control
--- the same flags, so toggling one updates the other automatically.
+-- [BLOCK 24] WORLD TAB — single source of truth for World Mods + Lighting.
+-- FIX #22: was duplicating Visuals WorldGroup + Lighting Extras. Now all world/lighting
+-- toggles live here. File-scoped helpers (snapshot_lighting_baseline, _terrain_decoration_*,
+-- snapshot_sky/restore_sky/applySkybox, potato_apply_one/potato_restore) are declared in
+-- BLOCK 09b so this IIFE can call them via upvalue.
 -- ═══════════════════════════════════════════════════════════════════════════
 ;(function()
     local WorldMainGroup  = Tabs.World:AddLeftGroupbox("World Mods")
     local WorldLightGroup = Tabs.World:AddRightGroupbox("Lighting")
 
-    WorldMainGroup:AddToggle("wt_fullbright", { Text = "Fullbright", Default = false, Callback = function(v) world_globals.fullbright = v end })
+    WorldMainGroup:AddToggle("wt_fullbright", { Text = "Fullbright", Default = false, Callback = function(v)
+        world_globals.fullbright = v
+        if v then _snapshot_lighting_baseline() else _restore_lighting_baseline() end
+    end })
+
     WorldMainGroup:AddToggle("wt_nofog", { Text = "No Fog", Default = false, Callback = function(v)
         world_globals.nofog = v
+        if v then
+            if not cheat._fog_snapshot then
+                cheat._fog_snapshot = {
+                    FogEnd = Lighting.FogEnd,
+                    FogStart = Lighting.FogStart,
+                    atmospheres = {},
+                }
+                for _, child in ipairs(Lighting:GetChildren()) do
+                    if child:IsA("Atmosphere") then
+                        cheat._fog_snapshot.atmospheres[child] = {
+                            Density = child.Density, Haze = child.Haze, Glare = child.Glare, Offset = child.Offset,
+                        }
+                    end
+                end
+                for _, child in ipairs(workspace:GetDescendants()) do
+                    if child:IsA("Atmosphere") and not cheat._fog_snapshot.atmospheres[child] then
+                        cheat._fog_snapshot.atmospheres[child] = {
+                            Density = child.Density, Haze = child.Haze, Glare = child.Glare, Offset = child.Offset,
+                        }
+                    end
+                end
+            end
+            Lighting.FogEnd = 100000000
+            Lighting.FogStart = 100000000
+            for atmo, _ in pairs(cheat._fog_snapshot.atmospheres) do
+                if atmo and atmo.Parent then
+                    atmo.Density = 0; atmo.Haze = 0; atmo.Glare = 0; atmo.Offset = 0
+                end
+            end
+            -- Listeners чтобы туман не возвращался при респавне
+            if not cheat._fog_listeners then
+                cheat._fog_listeners = {}
+                for atmo, _ in pairs(cheat._fog_snapshot.atmospheres) do
+                    cheat._fog_listeners[#cheat._fog_listeners+1] = atmo:GetPropertyChangedSignal("Density"):Connect(function()
+                        if world_globals.nofog and atmo.Density ~= 0 then
+                            atmo.Density = 0; atmo.Haze = 0; atmo.Glare = 0; atmo.Offset = 0
+                        end
+                    end)
+                end
+            end
+            cheat.utility.track_conn(Lighting.ChildAdded:Connect(function(child)
+                if world_globals.nofog and child:IsA("Atmosphere") then
+                    if not cheat._fog_snapshot.atmospheres[child] then
+                        cheat._fog_snapshot.atmospheres[child] = {Density=child.Density, Haze=child.Haze, Glare=child.Glare, Offset=child.Offset}
+                    end
+                    child.Density = 0; child.Haze = 0; child.Glare = 0; child.Offset = 0
+                    cheat.utility.track_conn(child:GetPropertyChangedSignal("Density"):Connect(function()
+                        if world_globals.nofog and child.Density ~= 0 then
+                            child.Density = 0; child.Haze = 0; child.Glare = 0; child.Offset = 0
+                        end
+                    end))
+                end
+            end))
+        else
+            if cheat._fog_snapshot then
+                Lighting.FogEnd = cheat._fog_snapshot.FogEnd or 100000
+                Lighting.FogStart = cheat._fog_snapshot.FogStart or 0
+                for atmo, orig in pairs(cheat._fog_snapshot.atmospheres) do
+                    if atmo and atmo.Parent then
+                        atmo.Density = orig.Density or 0.3
+                        atmo.Haze = orig.Haze or 0
+                        atmo.Glare = orig.Glare or 0
+                        atmo.Offset = orig.Offset or 0
+                    end
+                end
+                cheat._fog_snapshot = nil
+            end
+            if cheat._fog_listeners then
+                for _, c in ipairs(cheat._fog_listeners) do pcall(function() c:Disconnect() end) end
+                cheat._fog_listeners = nil
+            end
+        end
     end })
+
     WorldMainGroup:AddToggle("wt_noclouds", { Text = "No Clouds", Default = false, Callback = function(v)
-        local clouds = workspace.Terrain:FindFirstChildOfClass("Clouds")
-        if clouds then clouds.Enabled = not v end
+        world_globals.noclouds = v
+        local t_clouds = workspace.Terrain:FindFirstChildOfClass("Clouds")
+        if t_clouds then t_clouds.Enabled = not v end
         for _, c in ipairs(Lighting:GetChildren()) do
             if c:IsA("Clouds") then c.Enabled = not v end
         end
     end })
-    WorldMainGroup:AddToggle("wt_nograss", { Text = "No Grass", Default = false, Callback = function(v) pcall(function() sethiddenproperty(workspace.Terrain, "Decoration", not v) end) end })
-    WorldMainGroup:AddToggle("wt_noleafs", { Text = "No Leafs", Default = false, Callback = function(v) world_globals.noleafs = v end })
-    WorldMainGroup:AddToggle("wt_noshadows", { Text = "No Shadows", Default = false, Callback = function(v) world_globals.noshadows = v end })
 
+    WorldMainGroup:AddToggle("wt_nograss", { Text = "No Grass", Default = false, Callback = function(v)
+        if _terrain_decoration_method() == "none" then return end
+        if v and _grass_baseline == nil then
+            _grass_baseline = _terrain_decoration_get()
+        end
+        if v then
+            -- FIX (dj regression): never reference Enum.TerrainDecoration directly — it
+            -- doesn't exist on dj's Roblox build. Use the adaptive disabled value (false
+            -- for bool-typed Decoration, the enum only if it actually exists).
+            local disable_val = _terrain_decoration_disabled_value()
+            if disable_val ~= nil then
+                _terrain_decoration_set(disable_val)
+            end
+        elseif _grass_baseline ~= nil then
+            _terrain_decoration_set(_grass_baseline)
+            _grass_baseline = nil
+        end
+    end })
+
+    WorldMainGroup:AddToggle("wt_noleafs", { Text = "No Leafs", Default = false, Callback = function(v)
+        world_globals.noleafs = v
+        if not v and _leafs_original then
+            for part, orig in pairs(_leafs_original) do
+                if part and part.Parent then pcall(function() part.Transparency = orig end) end
+            end
+            _leafs_original = nil
+        end
+    end })
+
+    WorldMainGroup:AddToggle("wt_noshadows", { Text = "No Shadows", Default = false, Callback = function(v)
+        world_globals.noshadows = v
+        if v then _snapshot_lighting_baseline() else _restore_lighting_baseline() end
+    end })
+
+    -- Lighting group
     WorldLightGroup:AddToggle("wt_timeon", { Text = "Time Changer", Default = false, Callback = function(v)
         world_globals_ex.EnableTime = v
         if v then
@@ -6819,13 +7346,59 @@ end)()
         end
     end })
     WorldLightGroup:AddSlider("wt_time", { Text = "Time", Min = 0, Max = 240, Rounding = 0, Default = 120, Callback = function(v) world_globals_ex.Time = v / 10 end })
-    WorldLightGroup:AddToggle("wt_ambient", { Text = "Ambient Color", Default = false, Callback = function(v)
+
+    local ambTog = WorldLightGroup:AddToggle("wt_ambient", { Text = "Ambient Color", Default = false, Callback = function(v)
         world_globals_ex.gradientenabled = v
         if v then
             lighting_snapshot = lighting_snapshot or snapshot_lighting()
         elseif lighting_snapshot then
             Lighting.Ambient = lighting_snapshot.ambient
             Lighting.OutdoorAmbient = lighting_snapshot.outdoor
+        end
+    end })
+    ambTog:AddColorPicker("wt_ambcol1", { Title = "Ambient Color", Default = Color3.new(1,1,1), Callback = function(v) grad_col1 = v; grad_col2 = v end })
+
+    WorldLightGroup:AddDropdown("wt_skybox", { Text = "Custom Skybox", Values = {"None","Default","Nebula","Blue Nebula","Setting Hills","Blue Aurora","Red Aurora","Pink Vision","Twilight","Distopia","Peaceful"}, Default = "None", Multi = false, Callback = function(v)
+        if v == "None" then
+            restore_sky()
+            current_skybox = "None"
+        else
+            current_skybox = v
+        end
+    end })
+
+    WorldLightGroup:AddToggle("wt_potato", { Text = "Extreme Potato Mode", Default = false, Callback = function(v)
+        extreme_potato_mode = v
+        if v then
+            potato_snapshot = potato_snapshot or {
+                terrain = {
+                    decoration = workspace.Terrain.Decoration,
+                    waterwavesize = workspace.Terrain.WaterWaveSize,
+                    waterwavespeed = workspace.Terrain.WaterWaveSpeed,
+                    waterreflectance = workspace.Terrain.WaterReflectance,
+                    watertransparency = workspace.Terrain.WaterTransparency,
+                },
+                globalshadows = Lighting.GlobalShadows,
+                fogend = Lighting.FogEnd,
+                lighting_children = {},
+                parts = {},
+                decals = {},
+            }
+            pcall(function()
+                workspace.Terrain.Decoration = false
+                workspace.Terrain.WaterWaveSize = 0; workspace.Terrain.WaterWaveSpeed = 0
+                workspace.Terrain.WaterReflectance = 0; workspace.Terrain.WaterTransparency = 0
+                Lighting.GlobalShadows = false; Lighting.FogEnd = 9e9
+                for _, o in pairs(Lighting:GetChildren()) do
+                    if o:IsA("PostEffect") or o:IsA("Atmosphere") or o:IsA("Sky") or o:IsA("Clouds") then
+                        if potato_snapshot.lighting_children[o] == nil then potato_snapshot.lighting_children[o] = o.Enabled end
+                        o.Enabled = false
+                    end
+                end
+            end)
+            for _, obj in pairs(workspace:GetDescendants()) do potato_apply_one(obj) end
+        else
+            potato_restore()
         end
     end })
 end)()
@@ -6839,6 +7412,7 @@ end)()
     local _friend_labels = {}
     local _friend_browser_visible = false
     local _rebuild_player_list = function() end  -- placeholder, reassigned below
+    local _update_friend_list = function() end   -- placeholder, reassigned below
 
     FriendGroup:AddLabel("Friend Color"):AddColorPicker("friend_color", {
         Default = Color3.fromRGB(0, 150, 255),
@@ -6854,7 +7428,7 @@ end)()
         end
     })
 
-    function _update_friend_list()
+    function _update_friend_list()  -- assigns to the placeholder local declared above (FIX #15)
         for _, l in pairs(_friend_labels) do pcall(function() l:Destroy() end) end
         _friend_labels = {}
         local sorted = {}
@@ -6872,19 +7446,19 @@ end)()
     _update_friend_list()
 
     -- Auto-refresh when player joins/leaves while browser is open
-    Players.PlayerRemoving:Connect(function(player)
+    cheat.utility.track_conn(Players.PlayerRemoving:Connect(function(player)
         if cheat.friends[player.Name] then
             cheat.friends[player.Name] = nil
             _update_friend_list()
             if _friend_browser_visible then _rebuild_player_list() end
         end
-    end)
-    Players.PlayerAdded:Connect(function()
+    end))
+    cheat.utility.track_conn(Players.PlayerAdded:Connect(function()
         if _friend_browser_visible then
             task.wait(0.1)
             _rebuild_player_list()
         end
-    end)
+    end))
 
     -- Standalone GUI: list of all players on server, click to toggle friend status
     local FRIEND_ACCENT = Color3.fromRGB(220, 100, 100)
@@ -7208,6 +7782,394 @@ do
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- [BLOCK 15d] MISC TAB — Staff Detector (Mod/Tester/Content Creator detector)
+-- Детектор администрации: по группам + поведенческий анализ альтов
+-- Ловит модеров, тестеров и контент-мейкеров, включая тех кто на альтах без групп
+-- ═══════════════════════════════════════════════════════════════════════════
+do
+    local StaffDetectorGroup = Tabs.Misc:AddLeftGroupbox("Staff Detector")
+
+    local SD_GROUP_ID = 3765739
+    local SD_ROLE_MAP = {
+        tester = {
+            ["Tester"] = true,
+            ["Test Coordinator"] = true,
+        },
+        content_creator = {
+            ["Content Creator"] = true,
+            ["Partner"] = true,
+        },
+        mod = {
+            ["New Devs"] = true,
+            ["Dev Team"] = true,
+            ["Moderator"] = true,
+            ["Head Moderator"] = true,
+            ["Admin"] = true,
+            ["Developer"] = true,
+            ["Lead developer"] = true,
+        },
+    }
+
+    local sd_enabled = false
+    local sd_connections = {}
+    local sd_player_data = {}
+    local sd_scan_acc = 0
+
+    -- Детект по группе: ТОЛЬКО GetRoleInGroup (возвращает имя роли строкой).
+    -- НЕ используем GetRankInGroup как fallback — rank 1 = "Guest" (дефолтный ранг
+    -- для ВСЕХ кто вступил в Roblox-группу ради бонусов), что даёт ложные срабатывания
+    -- на каждом обычном игроке. GetRoleInGroup надёжна: возвращает "" если не в группе,
+    -- или точное имя роли если в группе.
+    local function sd_detect_group(player)
+        local ok, role = pcall(function()
+            return player:GetRoleInGroup(SD_GROUP_ID)
+        end)
+        if ok and type(role) == "string" and role ~= "" then
+            if SD_ROLE_MAP.tester[role] then return "tester", role end
+            if SD_ROLE_MAP.content_creator[role] then return "content_creator", role end
+            if SD_ROLE_MAP.mod[role] then return "mod", role end
+        end
+        return nil, nil
+    end
+
+    -- +2 балла: Invisible — все BaseParts (кроме HRP) прозрачные, но жив
+    local function sd_check_invisible(character)
+        if not character then return false end
+        local hum = character:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return false end
+        for _, part in ipairs(character:GetChildren()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                if part.Transparency < 0.99 then
+                    return false
+                end
+            end
+        end
+        return true
+    end
+
+    -- +1 балл: Naked — нет оружия/брони в инвентаре (Shirt/Pants OK)
+    local function sd_check_naked(player)
+        local pfolder = ReplicatedStorage:FindFirstChild("Players")
+        local pdata = pfolder and pfolder:FindFirstChild(player.Name)
+        local pinv = pdata and pdata:FindFirstChild("Inventory")
+        if not pinv then return false end
+
+        for _, item in ipairs(pinv:GetChildren()) do
+            local slot_attr = item:GetAttribute("Slot") or ""
+
+            -- 1. Оружие с прикреплёнными модулями (Attachments)
+            local atts = item:FindFirstChild("Attachments")
+            if atts and #atts:GetChildren() > 0 then
+                return false
+            end
+
+            -- 2. Оружие в хотбаре (slot-based — для оружия без Attachments)
+            if slot_attr:find("ItemBack")
+               or slot_attr:find("ItemHip")
+               or slot_attr == "Melee" then
+                return false
+            end
+
+            -- 3. Броня
+            if slot_attr:find("ClothingHeadware")
+               or slot_attr:find("ClothingChestRig")
+               or slot_attr:find("ClothingLegArmor") then
+                return false
+            end
+
+            -- 4. Рюкзак — только если внутри что-то есть
+            if slot_attr:find("ClothingBackpack") then
+                local inner = item:FindFirstChild("Inventory")
+                if inner and #inner:GetChildren() > 0 then
+                    return false
+                end
+            end
+
+            -- 5. Equipment (GPS, Map, Compass, Lighter)
+            if slot_attr:find("Equipment") then
+                return false
+            end
+
+            -- 6. ClothingMask НЕ проверяем — в PD она может быть дефолтной при спавне.
+            -- Если уверен что это лут — раскомментируй:
+            -- if slot_attr:find("ClothingMask") then return false end
+        end
+
+        return true
+    end
+
+    -- +1 балл: No Tag — нет включённого BillboardGui на Head
+    local function sd_check_no_tag(character)
+        if not character then return false end
+        local head = character:FindFirstChild("Head")
+        if not head then return false end
+        for _, child in ipairs(head:GetChildren()) do
+            if child:IsA("BillboardGui") and child.Enabled then
+                return false
+            end
+        end
+        return true
+    end
+
+    -- +1 балл: God Mode — Health > 1000 или ForceField
+    local function sd_check_god_mode(character)
+        if not character then return false, false end
+        local hum = character:FindFirstChildOfClass("Humanoid")
+        local god_health = hum and hum.Health > 1000 or false
+        local has_ff = character:FindFirstChildOfClass("ForceField") ~= nil
+        return god_health, has_ff
+    end
+
+    -- Полный скан одного игрока
+    local function sd_scan_player(player, data)
+        if player == LocalPlayer then return 0, {} end
+        local character = player.Character
+        if not character then return 0, {} end
+
+        if data.last_character ~= character then
+            data.last_character = character
+            data.last_pos = nil
+            data.still_time = 0
+        end
+
+        local score = 0
+        local reasons = {}
+
+        if sd_check_invisible(character) then
+            score = score + 2
+            reasons[#reasons + 1] = "Invisible"
+        end
+
+        if sd_check_naked(player) then
+            score = score + 1
+            reasons[#reasons + 1] = "Naked"
+        end
+
+        if data.still_time and data.still_time >= 8 then
+            score = score + 1
+            reasons[#reasons + 1] = "Passive"
+        end
+
+        if sd_check_no_tag(character) then
+            score = score + 1
+            reasons[#reasons + 1] = "No Tag"
+        end
+
+        local god, ff = sd_check_god_mode(character)
+        if god then
+            score = score + 1
+            reasons[#reasons + 1] = "God Mode"
+        end
+        if ff then
+            score = score + 1
+            reasons[#reasons + 1] = "ForceField"
+        end
+
+        return score, reasons
+    end
+
+    -- Асинхронная проверка группы (с задержкой 1 сек)
+    local function sd_async_check(player)
+        task.spawn(function()
+            task.wait(1)
+            if not sd_enabled then return end
+            if not sd_player_data[player] then return end
+            local gtype, grole = sd_detect_group(player)
+            if gtype then
+                sd_player_data[player].group_type = gtype
+                sd_player_data[player].group_role = grole
+                local icons = {
+                    tester = "[TESTER]",
+                    content_creator = "[CREATOR]",
+                    mod = "[MOD]",
+                }
+                Library:Notify({
+                    Title = "Staff Detector",
+                    Description = (icons[gtype] or "[STAFF]") .. " " .. player.Name .. " joined — " .. grole,
+                    Time = 10,
+                })
+                task.spawn(function()
+                    local s = Instance.new("Sound")
+                    s.SoundId = "rbxassetid://4581728529"
+                    s.Volume = 2
+                    s.Parent = game:GetService("SoundService")
+                    s:Play()
+                    game:GetService("Debris"):AddItem(s, 5)
+                end)
+            end
+        end)
+    end
+
+    local function sd_start()
+        if sd_enabled then return end
+        sd_enabled = true
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                sd_player_data[player] = {
+                    group_type = nil,
+                    group_role = nil,
+                    last_pos = nil,
+                    last_character = nil,
+                    still_time = 0,
+                    last_score = 0,
+                    last_reasons = {},
+                    notified = nil,
+                }
+                sd_async_check(player)
+            end
+        end
+
+        sd_connections.player_added = Players.PlayerAdded:Connect(function(player)
+            if player == LocalPlayer then return end
+            sd_player_data[player] = {
+                group_type = nil,
+                group_role = nil,
+                last_pos = nil,
+                last_character = nil,
+                still_time = 0,
+                last_score = 0,
+                last_reasons = {},
+                notified = nil,
+            }
+            sd_async_check(player)
+        end)
+
+        sd_connections.player_removing = Players.PlayerRemoving:Connect(function(player)
+            local data = sd_player_data[player]
+            if data and data.group_type then
+                Library:Notify({
+                    Title = "Staff Detector",
+                    Description = player.Name .. " (" .. (data.group_role or data.group_type) .. ") left",
+                    Time = 5,
+                })
+            end
+            sd_player_data[player] = nil
+        end)
+
+        sd_scan_acc = 0
+        sd_connections.scan = cheat.utility.new_heartbeat(function(delta)
+            if not sd_enabled then return end
+            sd_scan_acc = sd_scan_acc + delta
+            if sd_scan_acc < 1.5 then return end
+            sd_scan_acc = 0
+
+            for player, data in pairs(sd_player_data) do
+                if not player or not player.Parent then
+                    sd_player_data[player] = nil
+                    continue
+                end
+
+                local character = player.Character
+                if character then
+                    local hrp = character:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        if data.last_pos then
+                            local flat_dist = (Vector3.new(hrp.Position.X, 0, hrp.Position.Z)
+                                             - Vector3.new(data.last_pos.X, 0, data.last_pos.Z)).Magnitude
+                            local speed = flat_dist / 1.5
+                            if speed < 2 then
+                                data.still_time = data.still_time + 1.5
+                            else
+                                data.still_time = 0
+                            end
+                        end
+                        data.last_pos = hrp.Position
+                    end
+                end
+
+                if data.group_type then continue end
+
+                local score, reasons = sd_scan_player(player, data)
+                data.last_score = score
+                data.last_reasons = reasons
+
+                local has_inv, has_naked, has_passive = false, false, false
+                for _, r in ipairs(reasons) do
+                    if r == "Invisible" then has_inv = true end
+                    if r == "Naked" then has_naked = true end
+                    if r == "Passive" then has_passive = true end
+                end
+
+                if has_inv and has_naked and has_passive then
+                    -- 100% стафф на альте (красное + звук)
+                    if data.notified ~= "confirmed" then
+                        data.notified = "confirmed"
+                        Library:Notify({
+                            Title = "Staff Detector",
+                            Description = "CONFIRMED STAFF ALT: " .. player.Name
+                                .. " (" .. table.concat(reasons, ", ") .. ")",
+                            Time = 15,
+                        })
+                        task.spawn(function()
+                            local s = Instance.new("Sound")
+                            s.SoundId = "rbxassetid://4581728529"
+                            s.Volume = 2
+                            s.Parent = game:GetService("SoundService")
+                            s:Play()
+                            game:GetService("Debris"):AddItem(s, 5)
+                        end)
+                    end
+                elseif score >= 3 then
+                    -- Подозрительный (жёлтое)
+                    -- Invisible(2) + Passive(1) = 3 (модер с дефолтным ножом)
+                    -- Invisible(2) + Naked(1) = 3 (тестер на альте)
+                    -- Invisible(2) + NoTag(1) = 3 и т.д.
+                    if data.notified ~= "suspicious" then
+                        data.notified = "suspicious"
+                        Library:Notify({
+                            Title = "Staff Detector",
+                            Description = "Suspicious: " .. player.Name
+                                .. " (" .. score .. " pts: " .. table.concat(reasons, ", ") .. ")",
+                            Time = 10,
+                        })
+                    end
+                else
+                    if data.notified and score < 2 then
+                        data.notified = nil
+                    end
+                end
+            end
+        end)
+    end
+
+    local function sd_stop()
+        sd_enabled = false
+        for _, conn in pairs(sd_connections) do
+            if conn and type(conn) == "table" and conn.Disconnect then
+                pcall(function() conn:Disconnect() end)
+            elseif conn and type(conn) == "userdata" then
+                pcall(function() conn:Disconnect() end)
+            end
+        end
+        sd_connections = {}
+        sd_player_data = {}
+    end
+
+    StaffDetectorGroup:AddToggle("staff_detector_on", {
+        Text = "Enable Staff Detector",
+        Default = false,
+        Tooltip = "Detect moderators/testers/creators by group role + behavioral analysis for alts without groups",
+        Callback = function(v)
+            if v then
+                sd_start()
+            else
+                sd_stop()
+            end
+        end
+    })
+
+    if cheat.raw_conns then
+        table.insert(cheat.raw_conns, {
+            Disconnect = function()
+                sd_stop()
+            end
+        })
+    end
+end
+
 -- [BLOCK 16] FINAL INIT
 -- ═══════════════════════════════════════════════════════════════════════════
 -- FIX #3: полный unload — чистит хуки, drawing'и, коннекты, GUI, parts, lighting,
@@ -7253,10 +8215,13 @@ cheat.unload = function()
         cheat._namecall_old = nil
     end
 
-    -- 7. Ресторим InstantMosin recoil (если был включён).
+    -- 7. Ресторим InstantMosin recoil (если был включён). FIX #18: lookup by name now.
     pcall(function()
-        for a, v in pairs(original_recoils) do
-            pcall(function() a:SetAttribute("RecoilStrength", v) end)
+        local ammo = ReplicatedStorage:FindFirstChild("AmmoTypes")
+        if not ammo then return end
+        for name, v in pairs(original_recoils) do
+            local a = ammo:FindFirstChild(name)
+            if a then pcall(function() a:SetAttribute("RecoilStrength", v) end) end
         end
     end)
 
@@ -7276,8 +8241,9 @@ cheat.unload = function()
     end)
     cheat.parts = {}
 
-    -- 10. Ресторим lighting (potato/time/ambient/skybox).
+    -- 10. Ресторим lighting (potato/time/ambient/skybox + fullbright/noshadows baseline).
     if cheat._lighting_restore then pcall(cheat._lighting_restore) end
+    if cheat._baseline_lighting_restore then pcall(cheat._baseline_lighting_restore) end
 
     -- 11. Ресторим камеру/мышь (freecam/3rd person могли их изменить).
     pcall(function()
